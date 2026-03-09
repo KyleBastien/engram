@@ -1,0 +1,1888 @@
+{
+  "project": "Engram",
+  "branchName": "ralph/engram",
+  "description": "Git-backed semantic context MCP server for AI coding agents — Rust binary with tree-sitter chunking, HNSW+BM25 hybrid search, knowledge write-back, and live dashboard",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Initialize Cargo workspace with Nx monorepo structure",
+      "description": "As a developer, I need a properly structured Cargo workspace with Nx orchestration so that all crates can be developed, built, and tested independently.",
+      "acceptanceCriteria": [
+        "Root Cargo.toml defines a workspace with members: crates/engram-core, crates/engram-ingest, crates/engram-query, crates/engram-mcp, crates/engram-store, crates/engram-cache, crates/engram-cli",
+        "Each crate has its own Cargo.toml with appropriate name and version 0.1.0",
+        "Root nx.json exists with workspace configuration",
+        "Each crate has a project.json with build, test, and lint targets using nx:run-commands wrapping Cargo commands",
+        "cargo build --workspace succeeds with empty lib.rs/main.rs files",
+        "nx run-many -t build succeeds",
+        ".gitignore includes target/, .engram-cache/, and node_modules/",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Define shared error types in engram-core",
+      "description": "As a developer, I need a unified error type hierarchy so that all crates use consistent error handling.",
+      "acceptanceCriteria": [
+        "engram-core exports an EngramError enum with variants: Io, Git, Config, Index, Embed, Serialize, Store, Mcp, ChunkParse",
+        "Each variant wraps a source error where appropriate using thiserror",
+        "A Result<T> type alias is exported as type Result<T> = std::result::Result<T, EngramError>",
+        "thiserror is the only error crate dependency",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Define Chunk and ChunkMetadata structs",
+      "description": "As a developer, I need the core data types for semantic chunks so that all crates share a common representation.",
+      "acceptanceCriteria": [
+        "engram-core exports a ChunkKind enum with variants: Function, Class, Method, Type, Impl, Module, DocSection, Readme, CommentBlock, Other",
+        "engram-core exports a ChunkMetadata struct with fields: chunk_id, kind, name, signature, start_line, end_line, content_hash, tags, indexed_at, source_commit, embedding_offset",
+        "Both types derive Serialize, Deserialize, Debug, Clone, PartialEq",
+        "ChunkMetadata can be serialized to JSON and deserialized from JSONL line format",
+        "Unit tests verify round-trip serialization for all ChunkKind variants",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Define EmbeddingProvider trait",
+      "description": "As a developer, I need the embedding provider trait definition so that concrete providers can be implemented against a stable interface.",
+      "acceptanceCriteria": [
+        "engram-core exports an EmbeddingProvider async trait with methods: name, dimensions, max_batch_size, embed",
+        "engram-core exports an EmbedError enum with variants: Api, RateLimited, TextTooLong, Unavailable",
+        "The trait uses #[async_trait] and is Send + Sync",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Define SymbolResolver trait",
+      "description": "As a developer, I need the symbol resolver trait definition so that tree-sitter and LSP backends can be implemented against a stable interface.",
+      "acceptanceCriteria": [
+        "engram-core exports a SymbolResolver async trait with methods: extract_exports, resolve_imports, find_references, type_hierarchy",
+        "Supporting types ExportedSymbol, ResolvedImport, SymbolId, SymbolReference, TypeHierarchy are defined",
+        "The trait uses #[async_trait] and is Send + Sync",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Define store schema version and store configuration types",
+      "description": "As a developer, I need the store configuration and schema types so that the store layout is well-defined and versioned.",
+      "acceptanceCriteria": [
+        "engram-core exports a StoreConfig struct matching the engram.config.yaml schema including: version, sources, store, embedding, symbol_resolution, chunking, search, context, modes, hooks, watcher, dashboard, benchmark, storage sections",
+        "Nested config types (SourceConfig, EmbeddingConfig, OllamaConfig, SearchConfig, DashboardConfig) are separate structs",
+        "A StoreSchema struct exists with version (semver) and store_id (UUID)",
+        "StoreConfig can be deserialized from a YAML string",
+        "A default StoreConfig is provided via Default trait with sensible defaults",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Define manifest types",
+      "description": "As a developer, I need the manifest type so that the global index manifest can be read and written.",
+      "acceptanceCriteria": [
+        "engram-core exports a Manifest struct with fields: chunk_count, last_indexed_commit, model_name, dimensions, source_repos, created_at, updated_at",
+        "Manifest derives Serialize, Deserialize, Debug, Clone",
+        "Can be serialized/deserialized to/from manifest.json",
+        "Unit tests verify JSON round-trip",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Implement Ollama embedding provider",
+      "description": "As a developer, I need the Ollama embedding provider so that embeddings can be generated locally using Ollama.",
+      "acceptanceCriteria": [
+        "New crate directory crates/engram-providers/ollama/ exists with its own Cargo.toml",
+        "The provider implements the EmbeddingProvider trait from engram-core",
+        "name() returns a string like 'ollama/nomic-embed-text' based on configured model",
+        "dimensions() returns the configured dimension count (default 768)",
+        "embed() sends a POST request to the Ollama API /api/embed endpoint using reqwest",
+        "If Ollama is not reachable, embed() returns EmbedError::Unavailable",
+        "Batch embedding sends all texts in a single request",
+        "cargo test -p engram-provider-ollama passes with mocked HTTP",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Implement git store initialization (engram init)",
+      "description": "As a developer, I need git store initialization so that engram init --local creates a properly structured semantic store repository.",
+      "acceptanceCriteria": [
+        "engram-store implements Store::init_local(path, config) -> Result<Store>",
+        "Creates a new git repository at the specified path using git2",
+        "Creates directory structure: .engram/ (with version and store-id files), index/, knowledge/ (with subdirectories: decisions/, lessons/, patterns/, glossary/, onboarding/), snapshots/ (with active/, compressed/, archived/), metrics/ (with baseline/, runs/)",
+        "Writes engram.config.yaml with the provided config",
+        "Writes .engram/version with '1.0.0' and .engram/store-id with a generated UUID",
+        "Creates .gitignore that ignores .engram-cache/",
+        "Makes an initial git commit: 'engram: initialize store'",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Implement JSONL chunk metadata serialization",
+      "description": "As a developer, I need JSONL serialization for chunk metadata so that chunk metadata files can be written and read from the git store.",
+      "acceptanceCriteria": [
+        "engram-store exports write_chunks_jsonl(path, chunks) that writes one JSON object per line",
+        "engram-store exports read_chunks_jsonl(path) that reads and parses JSONL",
+        "Empty files return an empty vec (not an error)",
+        "Lines with trailing newlines or whitespace are handled gracefully",
+        "Unit tests verify round-trip for multiple chunks",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Implement binary embedding file format",
+      "description": "As a developer, I need the binary embedding file format so that embedding vectors can be stored compactly in the git store.",
+      "acceptanceCriteria": [
+        "engram-store exports write_embeddings_bin(path, vectors, dimensions)",
+        "Binary format: 16-byte header (magic b'EGRM', version u16=1, dimensions u16, count u32, precision u16=0 for f32, reserved u16=0) followed by contiguous f32 vectors",
+        "engram-store exports read_embeddings_bin(path) returning EmbeddingFile with dimensions, count, precision, and raw vector data",
+        "Magic bytes validated on read; mismatched magic returns error",
+        "Version validated on read; unsupported versions return error",
+        "Unit tests verify round-trip for 0, 1, and 100 vectors",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Implement git commit helper for store changes",
+      "description": "As a developer, I need a git commit helper so that store changes are committed with structured messages.",
+      "acceptanceCriteria": [
+        "engram-store exports commit_changes(repo, message) that stages all changes and commits",
+        "Uses git2 to add all modified/new/deleted files to the index",
+        "Commit author is set to 'engram' with email 'engram@local'",
+        "Returns the commit OID on success",
+        "If there are no changes, returns Ok without creating an empty commit",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Implement store file path resolution",
+      "description": "As a developer, I need file path resolution so that the store maps source repo files to their correct locations in the index/ directory.",
+      "acceptanceCriteria": [
+        "engram-store exports chunks_path(store_root, source_name, relative_file_path) returning PathBuf for .chunks.jsonl",
+        "engram-store exports embeddings_path(store_root, source_name, relative_file_path) returning PathBuf for .embeddings.bin",
+        "Parent directories are created automatically if they don't exist",
+        "Paths with special characters are handled safely (no path traversal)",
+        "Unit tests verify correct path generation for nested paths",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Implement manifest read/write",
+      "description": "As a developer, I need manifest read/write so that the global manifest.json tracks index state.",
+      "acceptanceCriteria": [
+        "engram-store exports write_manifest(store_root, manifest) that writes index/manifest.json",
+        "engram-store exports read_manifest(store_root) returning Option<Manifest> (None if not found)",
+        "JSON is pretty-printed for readability in git diffs",
+        "Unit tests verify round-trip",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Implement tree-sitter AST chunking for TypeScript",
+      "description": "As a developer, I need tree-sitter-based chunking for TypeScript so that TS/TSX files are split into semantic chunks.",
+      "acceptanceCriteria": [
+        "engram-ingest implements a TreeSitterChunker struct",
+        "chunk_file(path, source, language) parses source using tree-sitter and extracts chunks",
+        "For TypeScript, extracts: function_declaration, arrow_function (when assigned), class_declaration, method_definition, type_alias_declaration, interface_declaration, enum_declaration, export_statement",
+        "Each RawChunk contains: kind, name, signature, start_line, end_line, content",
+        "Functions/methods include their full body",
+        "Chunks do not overlap",
+        "File-level code not inside any declaration captured as ChunkKind::Module",
+        "cargo test -p engram-ingest passes with TypeScript test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Implement tree-sitter AST chunking for Rust",
+      "description": "As a developer, I need tree-sitter-based chunking for Rust so that .rs files are split into semantic chunks.",
+      "acceptanceCriteria": [
+        "TreeSitterChunker supports Rust language",
+        "For Rust, extracts: function_item, struct_item, enum_item, impl_item, trait_item, type_item, mod_item, const_item, static_item, macro_definition",
+        "impl blocks are chunked as a single unit (impl + all methods inside)",
+        "Each chunk has correct kind, name, signature, line range, and content",
+        "cargo test -p engram-ingest passes with Rust test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Implement tree-sitter AST chunking for Python",
+      "description": "As a developer, I need tree-sitter-based chunking for Python so that .py files are split into semantic chunks.",
+      "acceptanceCriteria": [
+        "TreeSitterChunker supports Python language",
+        "For Python, extracts: function_definition, class_definition, decorated_definition",
+        "Class bodies include all methods as part of the class chunk",
+        "Decorators are included with the decorated function/class",
+        "Each chunk has correct kind, name, signature, line range, and content",
+        "cargo test -p engram-ingest passes with Python test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Implement fallback sliding window chunker",
+      "description": "As a developer, I need a fallback chunker so that files in unsupported languages are still indexed.",
+      "acceptanceCriteria": [
+        "engram-ingest implements a SlidingWindowChunker struct",
+        "chunk_file(source, max_tokens, overlap_tokens) splits text into overlapping windows",
+        "Token count approximated by splitting on whitespace",
+        "Each chunk has kind: ChunkKind::Other, generated name (chunk_0, chunk_1), line range, and content",
+        "Files smaller than max_tokens produce a single chunk",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Implement Markdown header-based chunker",
+      "description": "As a developer, I need a Markdown chunker so that documentation files are split at heading boundaries.",
+      "acceptanceCriteria": [
+        "engram-ingest implements a MarkdownChunker struct",
+        "Splits Markdown files at #, ##, ### heading boundaries",
+        "Each chunk name is the heading text, kind is ChunkKind::DocSection",
+        "Content between headings (including heading line) is the chunk content",
+        "Preamble before first heading is captured as a chunk with name 'preamble'",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Implement language detection from file extension",
+      "description": "As a developer, I need language detection so that the correct chunker is selected for each file.",
+      "acceptanceCriteria": [
+        "engram-ingest exports detect_language(path) -> ChunkerKind",
+        "Returns TreeSitter(TypeScript) for .ts, .tsx",
+        "Returns TreeSitter(Rust) for .rs",
+        "Returns TreeSitter(Python) for .py",
+        "Returns Markdown for .md, .mdx",
+        "Returns SlidingWindow for other text file extensions",
+        "Returns Skip for binary extensions (.png, .jpg, .wasm, .bin, etc.)",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Implement content hashing for change detection",
+      "description": "As a developer, I need content hashing so that unchanged chunks can be skipped during re-embedding.",
+      "acceptanceCriteria": [
+        "engram-ingest exports content_hash(content) returning hex-encoded SHA-256 hash",
+        "engram-ingest exports has_chunk_changed(old_hash, new_hash) -> bool",
+        "Hashing is deterministic — same content always produces same hash",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Implement incremental change detection via git diff",
+      "description": "As a developer, I need incremental change detection so that only modified files are re-chunked and re-embedded.",
+      "acceptanceCriteria": [
+        "engram-ingest exports detect_changed_files(repo_path, since_commit) -> Result<ChangedFiles> using git2",
+        "ChangedFiles contains added, modified, deleted Vec<PathBuf>",
+        "If since_commit is None, all tracked files returned as 'added' (full index)",
+        "Respects include/exclude glob patterns from SourceConfig",
+        "cargo test -p engram-ingest passes (test uses temp git repo with staged changes)",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Implement the full ingest pipeline",
+      "description": "As a developer, I need the full ingest pipeline orchestrator so that a source repo can be indexed end-to-end into the git store.",
+      "acceptanceCriteria": [
+        "engram-ingest exports IngestPipeline with async fn run(source, store, provider, full) -> Result<IngestReport>",
+        "Pipeline steps: detect changed files, chunk each file, compute content hashes and skip unchanged, batch-embed new/modified chunks, write .chunks.jsonl and .embeddings.bin, remove files for deleted sources, update manifest.json, invalidate cache fingerprint, commit changes",
+        "IngestReport contains: files_processed, chunks_created, chunks_skipped, chunks_deleted, embed_calls",
+        "Commit message format: 'engram: reindex N files, M chunks updated'",
+        "cargo test -p engram-ingest passes (integration test with temp source repo and temp store)",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Implement HNSW vector index wrapper",
+      "description": "As a developer, I need an HNSW vector index so that semantic search can find the most similar chunks to a query embedding.",
+      "acceptanceCriteria": [
+        "engram-query implements HnswIndex wrapping the usearch crate",
+        "HnswIndex::build(chunks, dimensions) constructs the index from chunk ID + vector pairs",
+        "HnswIndex::search(query, top_k) returns (chunk_id_key, distance) sorted by ascending distance",
+        "HnswIndex::save(path) serializes the index to disk",
+        "HnswIndex::load(path) loads a serialized index",
+        "Search returns in < 10ms for 50k vectors",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Implement BM25 inverted index",
+      "description": "As a developer, I need a BM25 inverted index so that keyword search complements semantic search.",
+      "acceptanceCriteria": [
+        "engram-query implements Bm25Index",
+        "Bm25Index::build(chunks) constructs from chunk name, signature, and tags fields",
+        "Bm25Index::search(query, top_k) returns (chunk_id_key, score) sorted by descending relevance",
+        "BM25 scoring uses standard parameters (k1=1.2, b=0.75)",
+        "Index tokenizes on word boundaries and lowercases tokens",
+        "Bm25Index::save and ::load for cache persistence",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Implement hybrid search combining HNSW and BM25",
+      "description": "As a developer, I need hybrid search so that queries combine semantic similarity and keyword relevance.",
+      "acceptanceCriteria": [
+        "engram-query exports HybridSearch with async fn search(query, query_embedding, top_k, alpha) -> Vec<SearchResult>",
+        "Score computed as: alpha * normalized_vector_score + (1 - alpha) * normalized_bm25_score",
+        "Vector and BM25 scores normalized to [0,1] range",
+        "Results deduplicated by chunk_id",
+        "SearchResult contains: chunk_id, score, kind, name, signature, file, repo, lines, stale",
+        "Default alpha is 0.7 (favor semantic)",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Implement metadata lookup indexes",
+      "description": "As a developer, I need in-memory metadata indexes for direct lookups by file path, symbol name, chunk ID, and tag.",
+      "acceptanceCriteria": [
+        "engram-query implements MetadataIndex with maps: chunk_id->ChunkMetadata, file_path->Vec, symbol_name->Vec, tag->Vec",
+        "MetadataIndex::build(chunks) constructs all maps",
+        "lookup_by_id, lookup_by_file, lookup_by_symbol, lookup_by_tag methods implemented",
+        "All lookups are O(1) using HashMap",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Implement compiled index cache write",
+      "description": "As a developer, I need to write compiled index caches so that subsequent boots are fast.",
+      "acceptanceCriteria": [
+        "engram-cache exports write_cache(cache_dir, hnsw, bm25, metadata, manifest_hash)",
+        "Writes to .engram-cache/: fingerprint (SHA-256 of manifest.json), hnsw.index, bm25.index, metadata.bin",
+        "Creates .engram-cache/ directory if it doesn't exist",
+        "cargo test -p engram-cache passes",
+        "Typecheck passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Implement compiled index cache read and validation",
+      "description": "As a developer, I need to read and validate the compiled index cache so that cache hits skip the slow cold boot path.",
+      "acceptanceCriteria": [
+        "engram-cache exports try_load_cache(cache_dir, current_manifest_hash) -> Result<Option<CachedIndex>>",
+        "If fingerprint doesn't exist or doesn't match, returns None (cache miss)",
+        "If fingerprint matches, loads hnsw.index, bm25.index, metadata.bin and returns Some(CachedIndex)",
+        "If any cache file is corrupted or missing, returns None gracefully (no panic)",
+        "cargo test -p engram-cache passes",
+        "Typecheck passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Implement cache invalidation",
+      "description": "As a developer, I need cache invalidation so that stale caches are rebuilt after reindex.",
+      "acceptanceCriteria": [
+        "engram-cache exports invalidate_cache(cache_dir) that deletes the fingerprint file",
+        "After invalidation, try_load_cache returns None on next call",
+        "cargo test -p engram-cache passes",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Implement the full boot sequence",
+      "description": "As a developer, I need the full boot sequence so that Engram loads its index from the git store (fast path via cache, slow path via deserialization).",
+      "acceptanceCriteria": [
+        "engram-query exports IndexManager with async fn boot(store_root, config) -> Result<Self>",
+        "Boot sequence: read manifest.json, compute manifest hash, try loading compiled cache, if cache hit -> ready, if cache miss -> walk index/, deserialize all .chunks.jsonl, read all .embeddings.bin, build HNSW/BM25/metadata indexes, write compiled cache",
+        "IndexManager holds the live HNSW, BM25, and metadata indexes",
+        "Boot reports timing: 'Boot completed in Xms (cache hit)' or 'Boot completed in Xs (cold, N chunks)'",
+        "cargo test -p engram-query passes (integration test with populated store)",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Implement chunk staleness detection",
+      "description": "As a developer, I need staleness detection so that search results indicate when chunks may be out of date.",
+      "acceptanceCriteria": [
+        "engram-query exports check_staleness(chunks, source_repo_path) -> Result<HashMap<String, bool>>",
+        "A chunk is stale if its source_commit is not an ancestor of (or equal to) HEAD",
+        "Uses git2 to check commit ancestry",
+        "Stale chunks are still served (not removed)",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Implement MCP server bootstrap with stdio transport",
+      "description": "As a developer, I need the MCP server bootstrap so that Engram can be used as an MCP server over stdio.",
+      "acceptanceCriteria": [
+        "engram-mcp implements the MCP JSON-RPC protocol over stdin/stdout",
+        "Server responds to initialize with server capabilities listing available tools",
+        "Server responds to tools/list with tool definitions for Phase 1 tools",
+        "Server handles tools/call requests by dispatching to the appropriate handler",
+        "Server logs to stderr (not stdout, to avoid corrupting MCP transport)",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Implement engram_search MCP tool",
+      "description": "As a developer, I need the engram_search MCP tool so that agents can perform hybrid semantic + keyword search.",
+      "acceptanceCriteria": [
+        "Tool name: engram_search",
+        "Parameters: query (required), scope (optional: code/docs/knowledge/all, default all), top_k (optional), compact (optional)",
+        "Tool embeds the query then runs hybrid search",
+        "In Phase 1, scope only supports code, docs, and all",
+        "Compact mode omits signature and truncates long names",
+        "Response includes meta with code_count, search_time_ms, and compact",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Implement engram_lookup MCP tool",
+      "description": "As a developer, I need the engram_lookup MCP tool so that agents can directly look up chunks by file path, symbol name, or chunk ID.",
+      "acceptanceCriteria": [
+        "Tool name: engram_lookup",
+        "Parameters: identifier (required), include_content (optional, default false)",
+        "Detects identifier type: chunk ID (contains #), file path (contains / or .), or symbol name",
+        "Dispatches to appropriate MetadataIndex lookup",
+        "Returns matching chunks as JSON array",
+        "If include_content is true, includes raw source text read from source repo",
+        "Returns empty array for no matches (not an error)",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "Implement engram_status MCP tool",
+      "description": "As a developer, I need the engram_status MCP tool so that agents can check index health and staleness.",
+      "acceptanceCriteria": [
+        "Tool name: engram_status",
+        "No required parameters",
+        "Returns JSON with: total_chunks, source_repos (with name, chunk_count, last_indexed_commit, stale_chunks), index_age, cache_status, boot_time_ms, embedding_provider, store_path",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "Implement engram init CLI command",
+      "description": "As a developer, I need the engram init CLI command so that users can create a new semantic store.",
+      "acceptanceCriteria": [
+        "engram-cli binary crate uses clap for argument parsing",
+        "engram init --local [--path <dir>] creates a new local store (defaults to ./engram-store)",
+        "Calls Store::init_local from engram-store",
+        "Prints success message with the store path",
+        "If store already exists, prints error and exits with code 1",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "Implement engram reindex CLI command",
+      "description": "As a developer, I need the engram reindex CLI command so that users can trigger indexing of source repos.",
+      "acceptanceCriteria": [
+        "engram reindex [--full | --incremental] [--paths <glob>] [--repo <name>]",
+        "--full forces complete re-chunk and re-embed; --incremental (default) only processes changed files",
+        "--paths scopes to specific file globs; --repo scopes to a specific source repo",
+        "Reads engram.config.yaml to find source repos and embedding config",
+        "Runs IngestPipeline and prints IngestReport",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "Implement engram serve CLI command",
+      "description": "As a developer, I need the engram serve CLI command so that the MCP server can be started.",
+      "acceptanceCriteria": [
+        "engram serve [--transport stdio | --transport sse --port <port>] [--context <ctx>]",
+        "--transport stdio (default) starts MCP server reading from stdin, writing to stdout",
+        "--context sets the server context (default: 'default')",
+        "On start, runs the boot sequence to load the index",
+        "Logs boot timing and index stats to stderr",
+        "In Phase 1, only stdio transport is required",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Implement engram status CLI command",
+      "description": "As a developer, I need the engram status CLI command so that users can check store health from the terminal.",
+      "acceptanceCriteria": [
+        "engram status reads the store and prints: chunk count, source repos, last indexed commit per repo, staleness summary, cache status, embedding provider",
+        "Output is human-readable (not JSON)",
+        "If no store is found, prints error suggesting engram init",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "Define knowledge item types (Decision, Lesson, Pattern, Glossary)",
+      "description": "As a developer, I need the knowledge item data types so that all knowledge write-back tools share a common schema.",
+      "acceptanceCriteria": [
+        "engram-core exports Decision struct with fields: id, title, status, context, decision, consequences, related_files, contributed_by, created_at, embedding_ref",
+        "engram-core exports Lesson struct with fields: id, title, description, trigger, resolution, related_files, contributed_by, created_at, embedding_ref",
+        "engram-core exports Pattern struct with fields: id, name, description, examples, anti_patterns, contributed_by, created_at, embedding_ref",
+        "engram-core exports GlossaryEntry struct with fields: term, definition, context, contributed_by, created_at",
+        "All types derive Serialize, Deserialize, Debug, Clone",
+        "All types serialize to/from YAML format",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-042",
+      "title": "Define snapshot types with tiered storage",
+      "description": "As a developer, I need snapshot data types so that conversation context can be saved and restored.",
+      "acceptanceCriteria": [
+        "engram-core exports Snapshot struct with fields: session_id, summary, key_context, full_transcript, created_at, tier",
+        "SnapshotTier enum has variants: Active, Compressed, Archived",
+        "All types derive Serialize, Deserialize, Debug, Clone",
+        "Active snapshots serialize to YAML",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-043",
+      "title": "Define onboarding knowledge types",
+      "description": "As a developer, I need onboarding knowledge types so that automated bootstrapping produces well-structured knowledge files.",
+      "acceptanceCriteria": [
+        "engram-core exports ProjectOverview, BuildTestCommands, ArchitectureMap, KeyAbstractions structs",
+        "ProjectOverview has fields: name, language, framework, package_manager, repo_type, description, entry_points",
+        "BuildTestCommands has fields: build, test, lint, run (each CommandInfo with command, output_dir, framework, config, port)",
+        "ArchitectureMap has directories: Vec<DirectoryInfo> with path, purpose, key_files",
+        "KeyAbstractions has abstractions: Vec<Abstraction> and patterns: Vec<PatternInfo>",
+        "All types serialize to YAML",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-044",
+      "title": "Implement knowledge YAML write to git store",
+      "description": "As a developer, I need to write knowledge items as YAML files to the git store so that decisions, lessons, and patterns are versioned.",
+      "acceptanceCriteria": [
+        "engram-store exports write_decision writing to knowledge/decisions/{date}_{slug}.yaml",
+        "engram-store exports write_lesson writing to knowledge/lessons/{date}_{slug}.yaml",
+        "engram-store exports write_pattern writing to knowledge/patterns/{slug}.yaml",
+        "engram-store exports write_glossary_entry writing to knowledge/glossary/terms.yaml (appends/updates)",
+        "Slug generated from title by lowercasing and replacing spaces with hyphens",
+        "YAML output is human-readable with multiline strings where appropriate",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-045",
+      "title": "Implement knowledge item embedding and indexing",
+      "description": "As a developer, I need knowledge items to be embedded and indexed so that they are searchable alongside code chunks.",
+      "acceptanceCriteria": [
+        "When a knowledge item is written, its text content is embedded using the configured provider",
+        "Embedding stored in binary file alongside YAML (e.g., knowledge/decisions/2026-03-08_auth-strategy.embedding.bin)",
+        "The embedding_ref field in YAML points to this binary file",
+        "Knowledge embeddings use the same binary format as code chunk embeddings (EGRM header)",
+        "On boot, knowledge embeddings loaded into HNSW index in partition 2",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-046",
+      "title": "Implement snapshot write with tiered storage",
+      "description": "As a developer, I need snapshot storage so that conversation contexts can be saved and later retrieved or searched.",
+      "acceptanceCriteria": [
+        "engram-store exports write_snapshot writing to snapshots/active/{timestamp}_{session_id}.yaml",
+        "engram-store exports read_snapshot that searches all tiers for the snapshot",
+        "Compressed snapshots (.yaml.zst) transparently decompressed on read using zstd crate",
+        "Snapshot summary and key_context embedded and stored in partition 3 of HNSW index",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-047",
+      "title": "Implement snapshot tier promotion (engram compact)",
+      "description": "As a developer, I need snapshot compaction so that old snapshots are compressed to manage repo size.",
+      "acceptanceCriteria": [
+        "engram-store exports compact_snapshots(store_root) -> Result<CompactReport>",
+        "Snapshots in active/ older than 7 days are zstd-compressed and moved to compressed/",
+        "Snapshots in compressed/ older than 90 days moved to archived/",
+        "Original uncompressed files deleted after successful compression",
+        "CompactReport contains counts of snapshots promoted per tier",
+        "Changes committed: 'engram: compact N snapshots'",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-048",
+      "title": "Implement engram_record_decision MCP tool",
+      "description": "As a developer, I need the engram_record_decision MCP tool so that agents can commit architectural decisions to the knowledge base.",
+      "acceptanceCriteria": [
+        "Tool name: engram_record_decision",
+        "Required parameters: title, context, decision",
+        "Optional parameters: consequences, related_files, status (default 'accepted')",
+        "Auto-generates id, contributed_by, created_at",
+        "Writes decision YAML, embeds it, commits to store",
+        "Returns JSON with id, path, and committed: true",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-049",
+      "title": "Implement engram_record_lesson MCP tool",
+      "description": "As a developer, I need the engram_record_lesson MCP tool so that agents can commit lessons learned to the knowledge base.",
+      "acceptanceCriteria": [
+        "Tool name: engram_record_lesson",
+        "Required parameters: title, description, trigger",
+        "Optional parameters: resolution, related_files",
+        "Auto-generates id, contributed_by, created_at",
+        "Writes lesson YAML, embeds it, commits to store",
+        "Returns JSON with id, path, and committed: true",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 49,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-050",
+      "title": "Implement engram_record_pattern MCP tool",
+      "description": "As a developer, I need the engram_record_pattern MCP tool so that agents can document discovered code patterns.",
+      "acceptanceCriteria": [
+        "Tool name: engram_record_pattern",
+        "Required parameters: name, description",
+        "Optional parameters: examples, anti_patterns",
+        "Auto-generates id, contributed_by, created_at",
+        "Writes pattern YAML, embeds it, commits to store",
+        "Returns JSON with id, path, and committed: true",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 50,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-051",
+      "title": "Implement engram_record_glossary MCP tool",
+      "description": "As a developer, I need the engram_record_glossary MCP tool so that agents can add or update project-specific terminology.",
+      "acceptanceCriteria": [
+        "Tool name: engram_record_glossary",
+        "Required parameters: term, definition",
+        "Optional parameters: context",
+        "If term already exists in terms.yaml, updates it in place; if new, appends",
+        "Commits to store",
+        "Returns JSON with term, action (created or updated), and committed: true",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 51,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-052",
+      "title": "Implement engram_snapshot MCP tool",
+      "description": "As a developer, I need the engram_snapshot MCP tool so that agents can save full conversation context for session resumability.",
+      "acceptanceCriteria": [
+        "Tool name: engram_snapshot",
+        "Required parameters: session_id, summary, key_context, full_transcript",
+        "Writes snapshot to snapshots/active/ with timestamp prefix",
+        "Embeds summary + key_context for searchability",
+        "Commits to store: 'engram: snapshot session {session_id}'",
+        "Returns JSON with session_id, path, tier: active, and committed: true",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 52,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-053",
+      "title": "Implement index partitioning for knowledge items",
+      "description": "As a developer, I need the HNSW index to be partitioned so that code chunks and knowledge items can be queried separately in parallel.",
+      "acceptanceCriteria": [
+        "IndexManager partitions HNSW index: partition 0 (code), partition 1 (docs), partition 2 (knowledge), partition 3 (snapshots)",
+        "Partition determined by ChunkKind: functions/classes/methods/types/impls/modules -> 0, doc_sections/readmes/comment_blocks -> 1, knowledge -> 2, snapshots -> 3",
+        "Search can be filtered to specific partitions",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 53,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-054",
+      "title": "Implement sidecar knowledge search in engram_search",
+      "description": "As a developer, I need engram_search to run parallel sidecar queries against the knowledge partition so that agents see relevant knowledge alongside code results.",
+      "acceptanceCriteria": [
+        "engram_search runs two parallel queries: code/doc query (partitions 0+1), knowledge query (partition 2)",
+        "Response includes both code_results and knowledge_results sections",
+        "knowledge_results include: kind, id, title, relevance_score, related_files, created_at, and kind-specific fields",
+        "Knowledge results below min_relevance threshold (default 0.6) are dropped",
+        "Recency boost (default 1.1x) applied to knowledge items less than 30 days old",
+        "scope parameter controls sidecar: all -> both, code -> code only, docs -> docs only, knowledge -> knowledge only",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 54,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-055",
+      "title": "Implement project metadata detection for onboarding",
+      "description": "As a developer, I need project metadata detection so that onboarding can identify language, framework, and package manager.",
+      "acceptanceCriteria": [
+        "engram-ingest exports detect_project_metadata(repo_path) -> Result<ProjectOverview>",
+        "Detects language from file extensions and config files (Cargo.toml -> Rust, package.json -> TS/JS, etc.)",
+        "Detects framework from dependency files (react, nestjs, actix-web, django, etc.)",
+        "Detects package manager from lock files",
+        "Detects repo type: monorepo vs single project",
+        "Finds entry points by convention (src/main.ts, src/lib.rs, etc.)",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 55,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-056",
+      "title": "Implement build/test command extraction for onboarding",
+      "description": "As a developer, I need build/test command extraction so that onboarding discovers how to build, test, lint, and run a project.",
+      "acceptanceCriteria": [
+        "engram-ingest exports extract_build_commands(repo_path) -> Result<BuildTestCommands>",
+        "For Node.js: reads package.json scripts for build, test, lint, start/dev",
+        "For Rust: defaults to cargo build, cargo test, cargo clippy, cargo run",
+        "For Python: checks for pytest, tox, flake8/ruff",
+        "Detects test framework from config files (jest.config.ts -> Jest, etc.)",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 56,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-057",
+      "title": "Implement directory structure analysis for onboarding",
+      "description": "As a developer, I need directory structure analysis so that onboarding maps key directories and their purposes.",
+      "acceptanceCriteria": [
+        "engram-ingest exports analyze_directory_structure(repo_path, source_config) -> Result<ArchitectureMap>",
+        "Identifies key directories by naming conventions (src/auth/ -> authentication, src/api/ -> API routes, etc.)",
+        "Lists top 5 most important files per directory",
+        "Respects include/exclude globs from source config",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 57,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-058",
+      "title": "Implement key abstractions extraction for onboarding",
+      "description": "As a developer, I need key abstractions extraction so that onboarding identifies the most important types, classes, and patterns.",
+      "acceptanceCriteria": [
+        "engram-ingest exports extract_key_abstractions(repo_path, language) -> Result<KeyAbstractions>",
+        "Uses tree-sitter to find exported types, interfaces, classes, and traits",
+        "Prioritizes by: items exported from entry points, items referenced in many files, items in high-level directories",
+        "Extracts brief description from adjacent doc comments if available",
+        "Limits to top ~50 abstractions",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 58,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-059",
+      "title": "Implement full onboarding pipeline (engram onboard)",
+      "description": "As a developer, I need the full onboarding pipeline so that engram onboard runs end-to-end and produces knowledge files.",
+      "acceptanceCriteria": [
+        "engram-ingest exports async fn run_onboarding(repo_path, store, config, depth) -> Result<OnboardingReport>",
+        "OnboardingDepth enum: Quick, Standard, Deep",
+        "Quick: metadata + build commands + directory overview (~5s)",
+        "Standard (default): Quick + key abstractions + architecture map (~30s)",
+        "Deep: Standard + full symbol export analysis (~2-5min)",
+        "Writes YAML files to knowledge/onboarding/: project-overview.yaml, build-test-commands.yaml, architecture-map.yaml, key-abstractions.yaml",
+        "Embeds all onboarding knowledge files for searchability",
+        "Commits to store with descriptive message",
+        "Onboarding is idempotent — re-running overwrites existing files",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 59,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-060",
+      "title": "Implement engram_onboard MCP tool",
+      "description": "As a developer, I need the engram_onboard MCP tool so that agents can trigger onboarding from within a session.",
+      "acceptanceCriteria": [
+        "Tool name: engram_onboard",
+        "Optional parameters: repo (source repo name), depth (quick/standard/deep, default standard)",
+        "Calls the onboarding pipeline",
+        "Returns JSON with OnboardingReport fields",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 60,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-061",
+      "title": "Implement engram_assess_context MCP tool",
+      "description": "As a developer, I need the engram_assess_context tool so that agents can self-evaluate whether they have gathered enough context.",
+      "acceptanceCriteria": [
+        "Tool name: engram_assess_context",
+        "Optional parameters: task_description",
+        "Returns structured prompt with: summary of searches performed (count, queries), total tokens consumed, count and types of knowledge items surfaced, structured evaluation question",
+        "Tracks session search history in-memory",
+        "Does NOT perform any search itself — it's a reflection tool",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 61,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-062",
+      "title": "Implement engram_check_staleness MCP tool",
+      "description": "As a developer, I need the engram_check_staleness tool so that agents can assess whether their retrieved context is still current.",
+      "acceptanceCriteria": [
+        "Tool name: engram_check_staleness",
+        "No required parameters",
+        "Returns staleness info for all chunks retrieved so far in the session",
+        "Includes structured prompt asking the agent to decide if stale context is acceptable",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 62,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-063",
+      "title": "Implement engram onboard CLI command",
+      "description": "As a developer, I need the engram onboard CLI command so that users can trigger onboarding from the terminal.",
+      "acceptanceCriteria": [
+        "engram onboard [--depth quick|standard|deep] [--repo <name>]",
+        "Calls the onboarding pipeline",
+        "Prints progress indicators for each step",
+        "Prints OnboardingReport summary on completion",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 63,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-064",
+      "title": "Implement engram compact CLI command",
+      "description": "As a developer, I need the engram compact CLI command so that users can trigger snapshot tier promotion.",
+      "acceptanceCriteria": [
+        "engram compact runs snapshot compaction",
+        "Prints CompactReport (counts of snapshots promoted per tier)",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 64,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-065",
+      "title": "Extend ingest pipeline for multi-source-repo support",
+      "description": "As a developer, I need the ingest pipeline to support multiple source repos so that a single Engram store can index code from several repositories.",
+      "acceptanceCriteria": [
+        "IngestPipeline::run accepts a list of SourceConfig entries and processes each independently",
+        "Each source repo's chunks stored under index/{source_name}/",
+        "manifest.json source_repos field lists all indexed source repo names",
+        "Incremental indexing tracks last_indexed_commit per source repo independently",
+        "Source repos can have independent include/exclude patterns",
+        "cargo test -p engram-ingest passes (test with two temp source repos)",
+        "Typecheck passes"
+      ],
+      "priority": 65,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-066",
+      "title": "Add source_repo filter to metadata index",
+      "description": "As a developer, I need source repo filtering in the metadata index so that searches can be scoped to a specific repo.",
+      "acceptanceCriteria": [
+        "MetadataIndex adds source_repo -> Vec<ChunkMetadata> map",
+        "MetadataIndex::lookup_by_repo(repo) returns all chunks for a repo",
+        "engram_search gains repo parameter to scope search",
+        "When repo is specified, only chunks from that repo included in results",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 66,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-067",
+      "title": "Implement tree-sitter export extraction for cross-repo resolution",
+      "description": "As a developer, I need tree-sitter-based export extraction so that cross-repo references can be resolved.",
+      "acceptanceCriteria": [
+        "engram-ingest implements SymbolResolver extract_exports using tree-sitter",
+        "For TypeScript: extracts export declarations (named, default, re-exports)",
+        "For Rust: extracts pub items from module boundaries",
+        "For Python: extracts items in __all__ or top-level definitions",
+        "ExportedSymbol includes: name, kind, file, chunk_id",
+        "Results written to index/_xrefs/exports.jsonl",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 67,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-068",
+      "title": "Implement tree-sitter import resolution for cross-repo linking",
+      "description": "As a developer, I need tree-sitter-based import resolution so that cross-repo references can link importing files to their source exports.",
+      "acceptanceCriteria": [
+        "engram-ingest implements SymbolResolver resolve_imports using tree-sitter",
+        "For TypeScript: parses import statements, resolves paths via tsconfig.json and package.json",
+        "For Rust: parses use statements, resolves against Cargo workspace members",
+        "For Python: parses import/from...import, resolves against known packages",
+        "Cross-repo resolution uses heuristic matching",
+        "ResolvedImport includes: symbol, importing_repo, importing_file, source_repo, source_file, resolved_chunk, resolution: heuristic",
+        "Results written to index/_xrefs/imports.jsonl",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 68,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-069",
+      "title": "Build cross-repo symbol graph",
+      "description": "As a developer, I need the cross-repo symbol graph so that engram_graph can traverse dependencies across repository boundaries.",
+      "acceptanceCriteria": [
+        "engram-query builds in-memory directed graph from _xrefs/exports.jsonl and _xrefs/imports.jsonl",
+        "Graph edges represent: repo A file X imports symbol Y from repo B file Z",
+        "Graph supports traversal in both directions (callers/callees)",
+        "Graph built during boot alongside HNSW and BM25 indexes",
+        "Graph included in compiled cache for fast boot",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 69,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-070",
+      "title": "Implement engram_graph MCP tool",
+      "description": "As a developer, I need the engram_graph MCP tool so that agents can explore dependency/reference graphs across repos.",
+      "acceptanceCriteria": [
+        "Tool name: engram_graph",
+        "Required parameters: symbol",
+        "Optional parameters: direction (callers/callees/both, default both), depth (default 2)",
+        "Returns JSON graph with nodes (chunk_id, name, file, repo) and edges (source, target, relationship type)",
+        "Cross-repo edges clearly labeled with source and target repo names",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 70,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-071",
+      "title": "Implement engram_related MCP tool",
+      "description": "As a developer, I need the engram_related MCP tool so that agents can find chunks semantically related to a given chunk or symbol.",
+      "acceptanceCriteria": [
+        "Tool name: engram_related",
+        "Parameters: chunk_id (optional), symbol (optional, one required), top_k (optional, default 10)",
+        "If chunk_id provided, looks up chunk embedding and finds nearest neighbors",
+        "If symbol provided, looks up all chunks, averages embeddings, finds nearest neighbors",
+        "Results exclude the input chunk(s) themselves",
+        "Returns same format as engram_search code results",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 71,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-072",
+      "title": "Implement remote store initialization",
+      "description": "As a developer, I need remote store initialization so that engram init --remote clones or creates a remote-backed store.",
+      "acceptanceCriteria": [
+        "engram-store implements Store::init_remote(url, local_path, config) -> Result<Store>",
+        "If remote repo exists, clones it to local_path",
+        "If remote repo is empty, initializes local store and pushes initial commit",
+        "Stores remote URL in engram.config.yaml store.remote field",
+        "cargo test -p engram-store passes (test with local bare repo as remote)",
+        "Typecheck passes"
+      ],
+      "priority": 72,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-073",
+      "title": "Implement engram_sync pull/push",
+      "description": "As a developer, I need sync functionality so that local and remote stores stay in sync.",
+      "acceptanceCriteria": [
+        "engram-store exports sync_pull(store) -> Result<SyncReport> that runs git pull",
+        "engram-store exports sync_push(store) -> Result<SyncReport> that runs git push",
+        "SyncReport includes: direction, commits_transferred, conflicts",
+        "Conflicts on chunk files resolved via last-write-wins",
+        "Conflicts on manifest.json resolved by merging (higher chunk count, more recent updated_at)",
+        "Uses git2 for all git operations (no shell-out)",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 73,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-074",
+      "title": "Implement engram_sync MCP tool",
+      "description": "As a developer, I need the engram_sync MCP tool so that agents can trigger store sync within a session.",
+      "acceptanceCriteria": [
+        "Tool name: engram_sync",
+        "Optional parameters: direction (pull/push/both, default both)",
+        "Calls sync functions from engram-store",
+        "Returns JSON with SyncReport fields",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 74,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-075",
+      "title": "Implement engram sync and engram init --remote CLI commands",
+      "description": "As a developer, I need the sync and remote init CLI commands so that users can manage remote stores from the terminal.",
+      "acceptanceCriteria": [
+        "engram sync [--pull | --push | --both] (default --both) prints SyncReport summary",
+        "If no remote configured, prints error suggesting engram init --remote",
+        "engram init --remote <url> [--path <dir>] calls Store::init_remote and prints success message",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 75,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-076",
+      "title": "Create GitHub Agentic Workflow for remote reindexing",
+      "description": "As a developer, I need the GitHub Agentic Workflow definition so that remote stores can be reindexed automatically on push to main.",
+      "acceptanceCriteria": [
+        "File gh-aw/engram-reindex.md contains the workflow definition",
+        "Workflow triggers on: push to main, daily schedule (2am UTC)",
+        "Workflow steps: clone repos, run engram reindex --full, run engram analyze, flag stale knowledge, commit and push, open summary PR if >50 chunks updated",
+        "Workflow definition is clear enough for GitHub's agentic system to execute",
+        "Typecheck passes"
+      ],
+      "priority": 76,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-077",
+      "title": "Implement context system with tool surface control",
+      "description": "As a developer, I need the context system so that Engram adapts its exposed MCP tool set based on the client environment.",
+      "acceptanceCriteria": [
+        "engram-mcp reads --context flag on startup",
+        "Built-in contexts: default, claude-code, cursor, ci, ide-assistant with specific tool filtering per context",
+        "tools/list MCP response only includes tools allowed by the active context",
+        "Context is fixed for the session duration",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 77,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-078",
+      "title": "Implement mode system with dynamic switching",
+      "description": "As a developer, I need the mode system so that search behavior adapts to the current task type.",
+      "acceptanceCriteria": [
+        "engram-mcp tracks active modes (default: explore)",
+        "Built-in modes: explore, edit, plan, onboard, benchmark with specific behavior per mode",
+        "Multiple modes can be active simultaneously",
+        "Mode affects: knowledge sidecar top_k, min_relevance, boost factors",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 78,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-079",
+      "title": "Implement engram_switch_mode and engram_get_config MCP tools",
+      "description": "As a developer, I need the mode switching and config inspection tools so that agents can change modes and inspect configuration.",
+      "acceptanceCriteria": [
+        "engram_switch_mode: required modes parameter, validates mode names, returns active_modes and behavior_changes",
+        "engram_get_config: no required params, returns context, active_modes, available_tools, search_config, embedding_provider",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 79,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-080",
+      "title": "Implement custom context and mode YAML definitions",
+      "description": "As a developer, I need custom context and mode support so that users can define their own contexts and modes via YAML files.",
+      "acceptanceCriteria": [
+        "On startup, engram-mcp scans .engram/contexts/ and .engram/modes/ in the store for YAML files",
+        "Custom context YAML format: name, description, tools.exclude, search.compact_by_default, search.knowledge_sidecar",
+        "Custom mode YAML format: name, description, search.knowledge.top_k, min_relevance, boost_decisions, boost_patterns",
+        "Custom contexts and modes available alongside built-in ones",
+        "If custom name conflicts with built-in, custom definition wins",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 80,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-081",
+      "title": "Implement SSE transport for MCP server",
+      "description": "As a developer, I need SSE transport so that Engram can serve as an MCP server over HTTP with Server-Sent Events.",
+      "acceptanceCriteria": [
+        "engram serve --transport sse --port <port> starts an HTTP server using axum",
+        "SSE endpoint follows the MCP SSE transport specification",
+        "Multiple concurrent MCP clients can connect via SSE",
+        "Server handles JSON-RPC requests and sends responses/notifications via SSE",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 81,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-082",
+      "title": "Define benchmark session and metric types",
+      "description": "As a developer, I need benchmark data types so that benchmark sessions, events, and reports share a common schema.",
+      "acceptanceCriteria": [
+        "engram-core exports BenchmarkSession struct with: session_id, mode, task_description, started_at, ended_at, task_outcome, notes",
+        "engram-core exports BenchmarkEvent struct with: timestamp, event_type, query, tokens_used, files_read, chunks_returned, hit",
+        "engram-core exports BenchmarkReport struct with: session_id, mode, token_efficiency, retrieval_precision, retrieval_recall, time_to_first_edit_ms, file_read_count, search_to_read_ratio, context_waste_tokens",
+        "All types derive Serialize, Deserialize, Debug, Clone",
+        "cargo test -p engram-core passes",
+        "Typecheck passes"
+      ],
+      "priority": 82,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-083",
+      "title": "Implement benchmark session lifecycle in engram-bench",
+      "description": "As a developer, I need the benchmark session lifecycle so that sessions can be started, events logged, and metrics computed.",
+      "acceptanceCriteria": [
+        "New crate engram-bench exports BenchmarkHarness with: start, log_event, end methods",
+        "start creates session and returns session_id",
+        "log_event appends to in-memory event log",
+        "end computes metrics, generates BenchmarkReport, writes to metrics/runs/{timestamp}_{session_id}.jsonl",
+        "Multiple sessions can be active simultaneously",
+        "cargo test -p engram-bench passes",
+        "Typecheck passes"
+      ],
+      "priority": 83,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-084",
+      "title": "Implement metric computation from event logs",
+      "description": "As a developer, I need metric computation so that raw benchmark events produce meaningful metrics.",
+      "acceptanceCriteria": [
+        "engram-bench exports compute_metrics(events, session) -> BenchmarkReport",
+        "Computes: token_efficiency (sum of tokens_used), retrieval_precision (hit rate), time_to_first_edit_ms, file_read_count, search_to_read_ratio, context_waste_tokens",
+        "cargo test -p engram-bench passes",
+        "Typecheck passes"
+      ],
+      "priority": 84,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-085",
+      "title": "Implement baseline vs. assisted comparison report generation",
+      "description": "As a developer, I need comparison report generation so that baseline and assisted benchmark sessions can be compared.",
+      "acceptanceCriteria": [
+        "engram-bench exports compare(baseline, assisted) -> ComparisonReport",
+        "ComparisonReport includes metric-by-metric comparison with absolute and percentage differences",
+        "Positive differences (assisted better) clearly marked",
+        "Report serialized as YAML and committed to metrics/",
+        "cargo test -p engram-bench passes",
+        "Typecheck passes"
+      ],
+      "priority": 85,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-086",
+      "title": "Implement benchmark MCP tools (start, log, end)",
+      "description": "As a developer, I need the benchmark MCP tools so that agents can run benchmarked sessions.",
+      "acceptanceCriteria": [
+        "engram_benchmark_start: required mode (baseline/assisted) and task_description, returns session_id",
+        "engram_benchmark_log: required query, tokens_used, files_read; optional hit; logs event to active session",
+        "engram_benchmark_end: required task_outcome (success/failure/partial), optional notes; ends session, computes metrics, commits report",
+        "In assisted mode, engram_search auto-logs events; in baseline mode, engram_search is disabled",
+        "cargo test -p engram-mcp passes",
+        "Typecheck passes"
+      ],
+      "priority": 86,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-087",
+      "title": "Implement dashboard HTTP server in engram-dashboard",
+      "description": "As a developer, I need the dashboard HTTP server so that the web UI is served by the Engram process.",
+      "acceptanceCriteria": [
+        "New crate engram-dashboard implements an axum HTTP server",
+        "Server started alongside MCP server when dashboard.enabled is true",
+        "Serves on configurable port (default 3200)",
+        "Serves static HTML/JS/CSS bundled into binary using rust-embed",
+        "Dashboard accessible at http://localhost:{port}/dashboard",
+        "If dashboard.enabled is false or context is ci, server is not started",
+        "cargo test -p engram-dashboard passes",
+        "Typecheck passes"
+      ],
+      "priority": 87,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-088",
+      "title": "Implement WebSocket endpoint for real-time dashboard updates",
+      "description": "As a developer, I need a WebSocket endpoint so that the dashboard can receive live updates.",
+      "acceptanceCriteria": [
+        "engram-dashboard exposes WebSocket endpoint at /ws",
+        "Events broadcast to all connected clients: search queries, knowledge write-backs, reindex progress, session connect/disconnect",
+        "Events are JSON-serialized with type field",
+        "WebSocket handles multiple concurrent clients",
+        "cargo test -p engram-dashboard passes",
+        "Typecheck passes"
+      ],
+      "priority": 88,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-089",
+      "title": "Build dashboard frontend — Live Session View",
+      "description": "As a developer, I need the Live Session View page showing active MCP connections and real-time search activity.",
+      "acceptanceCriteria": [
+        "Static HTML/JS page connecting to WebSocket endpoint",
+        "Shows active MCP connections (client name, connected since, request count)",
+        "Shows real-time stream of search queries with: query text, result count, search time, knowledge sidecar hit/miss",
+        "Shows current active context and modes",
+        "Auto-scrolls the query stream",
+        "No build step required (vanilla JS or bundled at compile time)",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 89,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-090",
+      "title": "Build dashboard frontend — Index Health View",
+      "description": "As a developer, I need the Index Health View page showing the state of the semantic index.",
+      "acceptanceCriteria": [
+        "Shows total chunks indexed per source repo",
+        "Shows staleness map: files with stale chunks sorted by staleness",
+        "Shows last reindex time and duration per source repo",
+        "Shows embedding provider status (name, model, reachable)",
+        "Shows cache status (hit/miss, cache size on disk)",
+        "Data loaded via REST API endpoints",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 90,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-091",
+      "title": "Build dashboard frontend — Knowledge Activity View",
+      "description": "As a developer, I need the Knowledge Activity View showing recent write-backs and knowledge item counts.",
+      "acceptanceCriteria": [
+        "Shows recent write-backs (decisions, lessons, patterns) with timestamps and titles",
+        "Shows knowledge item count by category",
+        "Shows onboarding status per source repo",
+        "Data loaded via REST API endpoints",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 91,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-092",
+      "title": "Build dashboard frontend — Search Analytics View",
+      "description": "As a developer, I need the Search Analytics View showing search patterns and quality over time.",
+      "acceptanceCriteria": [
+        "Shows query frequency over time (line chart)",
+        "Shows average result relevance scores over time",
+        "Shows cache hit rate and SmartRouter sidecar hit rate",
+        "Data aggregated from WebSocket events",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 92,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-093",
+      "title": "Build dashboard frontend — Benchmark Dashboard View",
+      "description": "As a developer, I need the Benchmark Dashboard View showing benchmark results and trends.",
+      "acceptanceCriteria": [
+        "Shows active benchmark sessions with live event counts",
+        "Shows historical comparison trends: token savings over time",
+        "Shows per-task metrics drill-down (clickable table of past sessions)",
+        "Reads data from metrics/runs/ via REST API endpoints",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 93,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-094",
+      "title": "Implement REST API endpoints for dashboard data",
+      "description": "As a developer, I need REST API endpoints so that the dashboard frontend can fetch data.",
+      "acceptanceCriteria": [
+        "GET /api/status returns index health data",
+        "GET /api/knowledge returns knowledge item counts and recent write-backs",
+        "GET /api/benchmarks returns list of benchmark runs with summary metrics",
+        "GET /api/benchmarks/{session_id} returns detailed metrics for a specific run",
+        "GET /api/sessions returns active MCP session info",
+        "All endpoints return JSON",
+        "cargo test -p engram-dashboard passes",
+        "Typecheck passes"
+      ],
+      "priority": 94,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-095",
+      "title": "Implement benchmark CLI commands (run and report)",
+      "description": "As a developer, I need the benchmark CLI commands so that users can run and view benchmarks from the terminal.",
+      "acceptanceCriteria": [
+        "engram benchmark run --task 'description' --baseline --assisted orchestrates baseline and assisted sessions then generates comparison report",
+        "engram benchmark report [--last | --all | --compare <id1> <id2>] shows benchmark results",
+        "--last shows most recent run; --all lists all runs; --compare generates side-by-side comparison",
+        "Output is human-readable table",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 95,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-096",
+      "title": "Implement OpenAI embedding provider",
+      "description": "As a developer, I need the OpenAI embedding provider so that users can use OpenAI's text-embedding models.",
+      "acceptanceCriteria": [
+        "New crate crates/engram-providers/openai/ with its own Cargo.toml",
+        "Implements EmbeddingProvider trait from engram-core",
+        "name() returns 'openai/{model_name}'",
+        "embed() sends POST to OpenAI embeddings API (or custom base_url for Azure/proxies)",
+        "Reads API key from environment variable or key file",
+        "Handles rate limiting: respects Retry-After header, returns EmbedError::RateLimited",
+        "Supports configurable timeout and max_retries",
+        "cargo test -p engram-provider-openai passes with mocked HTTP",
+        "Typecheck passes"
+      ],
+      "priority": 96,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-097",
+      "title": "Implement Voyage embedding provider",
+      "description": "As a developer, I need the Voyage embedding provider so that users can use Voyage AI's code-optimized models.",
+      "acceptanceCriteria": [
+        "New crate crates/engram-providers/voyage/ with its own Cargo.toml",
+        "Implements EmbeddingProvider trait",
+        "name() returns 'voyage/{model_name}'",
+        "embed() sends POST to Voyage API",
+        "Reads API key from config",
+        "Handles rate limiting and retries",
+        "cargo test -p engram-provider-voyage passes with mocked HTTP",
+        "Typecheck passes"
+      ],
+      "priority": 97,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-098",
+      "title": "Implement ONNX in-process embedding provider",
+      "description": "As a developer, I need the ONNX embedding provider so that users can run embeddings locally without Ollama.",
+      "acceptanceCriteria": [
+        "New crate crates/engram-providers/onnx/ with its own Cargo.toml",
+        "Implements EmbeddingProvider trait using the ort crate",
+        "On first use, downloads model to ~/.engram/models/ if not cached",
+        "Supports quantized: true config for INT8 models and device config (cpu/cuda)",
+        "embed() runs inference in-process",
+        "Handles tokenization using model's bundled tokenizer",
+        "cargo test -p engram-provider-onnx passes",
+        "Typecheck passes"
+      ],
+      "priority": 98,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-099",
+      "title": "Implement custom HTTP embedding provider",
+      "description": "As a developer, I need the custom HTTP provider so that users can point Engram at any embedding API.",
+      "acceptanceCriteria": [
+        "New crate crates/engram-providers/custom/ with its own Cargo.toml",
+        "Implements EmbeddingProvider trait",
+        "embed() sends POST {texts: [...]} to configured endpoint and expects {embeddings: [[...]]}",
+        "Reads dimensions, max_batch_size from config",
+        "Supports custom headers with env var substitution via ${ENV_VAR} syntax",
+        "cargo test -p engram-provider-custom passes with mocked HTTP",
+        "Typecheck passes"
+      ],
+      "priority": 99,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-100",
+      "title": "Implement provider switching detection and reindex guard",
+      "description": "As a developer, I need provider switching detection so that mismatched embeddings are caught and blocked.",
+      "acceptanceCriteria": [
+        "On boot, compare configured provider/model against manifest.json model_name and dimensions",
+        "If mismatch, log warning and block search operations with error message suggesting engram reindex --full",
+        "engram_status reports the mismatch",
+        "After engram reindex --full, manifest updated and search unblocked",
+        "cargo test -p engram-query passes",
+        "Typecheck passes"
+      ],
+      "priority": 100,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-101",
+      "title": "Implement cost estimation for paid providers",
+      "description": "As a developer, I need cost estimation so that users can preview the cost of a full reindex before committing.",
+      "acceptanceCriteria": [
+        "engram reindex --estimate counts chunks, estimates tokens, computes cost per provider",
+        "Cost tables for OpenAI text-embedding-3-small/large and Voyage",
+        "Output shows: estimated chunks, tokens, cost, time",
+        "Does NOT perform any embedding calls",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 101,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-102",
+      "title": "Implement f16 embedding read/write support",
+      "description": "As a developer, I need f16 embedding support so that storage can be reduced by 50% with minimal recall loss.",
+      "acceptanceCriteria": [
+        "write_embeddings_bin supports precision: 1 (f16) via the half crate",
+        "When storage.embedding_precision is f16, embeddings converted from f32 to f16 before writing",
+        "read_embeddings_bin detects precision from header and converts f16 back to f32 for HNSW index",
+        "Precision flag correctly set (0=f32, 1=f16)",
+        "Unit tests verify round-trip accuracy within acceptable tolerance (< 0.1% relative error)",
+        "cargo test -p engram-store passes",
+        "Typecheck passes"
+      ],
+      "priority": 102,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-103",
+      "title": "Implement LSP client for symbol resolution",
+      "description": "As a developer, I need the LSP client so that exact symbol resolution is available as an alternative to tree-sitter heuristics.",
+      "acceptanceCriteria": [
+        "New crate crates/engram-lsp/ with its own Cargo.toml",
+        "Implements SymbolResolver trait from engram-core using LSP",
+        "Starts language servers on-demand during indexing (TypeScript, Rust, Python, Go)",
+        "Uses lsp-types crate for LSP protocol types",
+        "Calls textDocument/documentSymbol, textDocument/references, textDocument/typeHierarchy",
+        "Shuts down language servers after indexing completes",
+        "Cross-repo edges marked as resolution: exact",
+        "cargo test -p engram-lsp passes",
+        "Typecheck passes"
+      ],
+      "priority": 103,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-104",
+      "title": "Implement auto-install for language servers",
+      "description": "As a developer, I need auto-install so that users don't have to manually install language servers.",
+      "acceptanceCriteria": [
+        "When symbol_resolution.lsp.auto_install is true and server not found on PATH, attempts install",
+        "TypeScript: npm install -g typescript-language-server typescript",
+        "Rust: checks for rust-analyzer",
+        "Python: pip install python-lsp-server",
+        "Go: go install golang.org/x/tools/gopls@latest",
+        "If install fails, falls back to tree-sitter with warning",
+        "cargo test -p engram-lsp passes",
+        "Typecheck passes"
+      ],
+      "priority": 104,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-105",
+      "title": "Integrate LSP with deep onboarding depth",
+      "description": "As a developer, I need LSP integration in deep onboarding so that deep onboarding produces exact cross-file dependency maps.",
+      "acceptanceCriteria": [
+        "When OnboardingDepth::Deep and symbol_resolution.backend is lsp, onboarding uses LSP for full symbol export analysis",
+        "Deep onboarding produces richer key-abstractions.yaml with exact type hierarchy",
+        "If LSP not configured, falls back to tree-sitter with warning",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 105,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-106",
+      "title": "Implement git hooks auto-install CLI command",
+      "description": "As a developer, I need git hooks auto-install so that source repos automatically trigger incremental reindexing.",
+      "acceptanceCriteria": [
+        "engram hooks install installs hooks into each configured source repo",
+        "Installs post-commit, post-merge, post-checkout hooks calling engram reindex --incremental --commit HEAD",
+        "If hooks already exist, appends (does not overwrite)",
+        "Prints which hooks were installed",
+        "engram init --hooks installs hooks during store creation",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 106,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-107",
+      "title": "Implement file watcher for real-time indexing",
+      "description": "As a developer, I need the file watcher so that the index stays up-to-date in real-time during active development.",
+      "acceptanceCriteria": [
+        "New crate engram-watch uses the notify crate for cross-platform file watching",
+        "Watches all configured source repo directories",
+        "Debounces file change events (configurable, default 2000ms)",
+        "On change: re-chunks and re-embeds changed files, updates store in-memory (no auto-commit)",
+        "Respects watcher.ignore patterns and source include/exclude patterns",
+        "cargo test -p engram-watch passes",
+        "Typecheck passes"
+      ],
+      "priority": 107,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-108",
+      "title": "Implement engram watch CLI command",
+      "description": "As a developer, I need the watch CLI command so that users can start the file watcher standalone.",
+      "acceptanceCriteria": [
+        "engram watch starts file watcher in foreground",
+        "Prints file change events as detected and processed",
+        "Ctrl+C triggers graceful shutdown",
+        "If watcher.enabled is true, watcher also started alongside engram serve",
+        "cargo test -p engram-cli passes",
+        "Typecheck passes"
+      ],
+      "priority": 108,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-109",
+      "title": "Implement tree-sitter chunking for Go",
+      "description": "As a developer, I need Go chunking so that .go files are properly indexed.",
+      "acceptanceCriteria": [
+        "TreeSitterChunker supports Go language",
+        "Extracts: function_declaration, method_declaration, type_declaration (struct, interface), const_declaration, var_declaration",
+        "Method receivers included in the chunk",
+        "cargo test -p engram-ingest passes with Go test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 109,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-110",
+      "title": "Implement tree-sitter chunking for Java",
+      "description": "As a developer, I need Java chunking so that .java files are properly indexed.",
+      "acceptanceCriteria": [
+        "TreeSitterChunker supports Java language",
+        "Extracts: class_declaration, method_declaration, interface_declaration, enum_declaration, constructor_declaration",
+        "Inner classes chunked as part of outer class",
+        "Annotations included with annotated declaration",
+        "cargo test -p engram-ingest passes with Java test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 110,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-111",
+      "title": "Implement tree-sitter chunking for C/C++",
+      "description": "As a developer, I need C/C++ chunking so that .c, .cpp, .h, .hpp files are properly indexed.",
+      "acceptanceCriteria": [
+        "TreeSitterChunker supports C and C++ languages",
+        "Extracts: function_definition, struct_specifier, class_specifier, enum_specifier, namespace_definition, template_declaration",
+        "Header files have their declarations chunked",
+        "cargo test -p engram-ingest passes with C/C++ test fixtures",
+        "Typecheck passes"
+      ],
+      "priority": 111,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-112",
+      "title": "Update language detection for Go, Java, C, and C++",
+      "description": "As a developer, I need language detection updated so that new languages use tree-sitter chunking.",
+      "acceptanceCriteria": [
+        "detect_language returns TreeSitter(Go) for .go",
+        "Returns TreeSitter(Java) for .java",
+        "Returns TreeSitter(C) for .c, .h",
+        "Returns TreeSitter(Cpp) for .cpp, .cc, .cxx, .hpp",
+        "cargo test -p engram-ingest passes",
+        "Typecheck passes"
+      ],
+      "priority": 112,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
