@@ -21,6 +21,12 @@ pub struct EngineState {
     pub provider: Box<dyn EmbeddingProvider>,
     /// Map from repo name to local filesystem path, used to read source content for engram_lookup.
     pub source_roots: HashMap<String, PathBuf>,
+    /// Time in milliseconds it took to boot/load the index.
+    pub boot_time_ms: u64,
+    /// Filesystem path to the engram store.
+    pub store_path: String,
+    /// Whether cache was used during boot ("hit", "miss", or "none").
+    pub cache_status: String,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -47,6 +53,9 @@ impl McpServer {
                 search,
                 provider,
                 source_roots: HashMap::new(),
+                boot_time_ms: 0,
+                store_path: String::new(),
+                cache_status: "none".to_string(),
             }),
         }
     }
@@ -62,6 +71,9 @@ impl McpServer {
                 search,
                 provider,
                 source_roots,
+                boot_time_ms: 0,
+                store_path: String::new(),
+                cache_status: "none".to_string(),
             }),
         }
     }
@@ -174,19 +186,7 @@ async fn handle_tools_call(
     match tool_name {
         "engram_search" => handle_engram_search(request, state).await,
         "engram_lookup" => handle_engram_lookup(request, state).await,
-        "engram_status" => {
-            // Tool handler will be implemented in US-036
-            JsonRpcResponse::success(
-                request.id.clone(),
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": "Tool 'engram_status' is not yet implemented"
-                    }],
-                    "isError": true
-                }),
-            )
-        }
+        "engram_status" => handle_engram_status(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -392,6 +392,51 @@ async fn handle_engram_lookup(
         "meta": {
             "count": formatted.len(),
         }
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
+async fn handle_engram_status(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let total_chunks = state.search.chunk_count();
+
+    let source_repos: Vec<serde_json::Value> = state
+        .search
+        .repo_stats()
+        .into_iter()
+        .map(|(name, chunk_count, stale_chunks)| {
+            json!({
+                "name": name,
+                "chunk_count": chunk_count,
+                "stale_chunks": stale_chunks
+            })
+        })
+        .collect();
+
+    let response_data = json!({
+        "total_chunks": total_chunks,
+        "source_repos": source_repos,
+        "cache_status": state.cache_status,
+        "boot_time_ms": state.boot_time_ms,
+        "embedding_provider": state.provider.name(),
+        "store_path": state.store_path,
     });
 
     JsonRpcResponse::success(
@@ -676,6 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_call_dispatches() {
+        // Without engine, engram_status returns error
         let input = make_request(
             1,
             "tools/call",
@@ -684,10 +730,9 @@ mod tests {
         let responses = run_server(&input).await;
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
-        // Stub returns isError:true since not yet implemented
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("engram_status"));
+        assert!(text.contains("not initialized"));
     }
 
     #[tokio::test]
@@ -1264,5 +1309,194 @@ mod tests {
         let responses = run_server_with_engine(&input).await;
         let result = responses[0].result.as_ref().unwrap();
         assert_eq!(result["isError"], true);
+    }
+
+    // --- engram_status tool tests ---
+
+    #[tokio::test]
+    async fn test_status_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_total_chunks() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["total_chunks"], 4);
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_source_repos() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let repos = data["source_repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["name"], "test-repo");
+        assert_eq!(repos[0]["chunk_count"], 4);
+        assert_eq!(repos[0]["stale_chunks"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_embedding_provider() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["embedding_provider"], "mock/test");
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_boot_time_ms() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["boot_time_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_cache_status() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["cache_status"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_status_returns_store_path() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["store_path"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_status_has_all_required_fields() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["total_chunks"].is_number());
+        assert!(data["source_repos"].is_array());
+        assert!(data["cache_status"].is_string());
+        assert!(data["boot_time_ms"].is_number());
+        assert!(data["embedding_provider"].is_string());
+        assert!(data["store_path"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_status_no_params_required() {
+        // engram_status should work with no arguments at all
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status"})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn test_status_stale_chunks_counted() {
+        let dims = 32;
+        let v0 = make_vector(dims, 0.0);
+        let v1 = make_vector(dims, 1.0);
+        let entries: Vec<(u64, &[f32])> = vec![(0, &v0), (1, &v1)];
+        let hnsw = HnswIndex::build(&entries, dims).unwrap();
+        let docs = vec![
+            make_doc(0, "func_a", Some("fn func_a()"), &[]),
+            make_doc(1, "func_b", Some("fn func_b()"), &[]),
+        ];
+        let bm25 = Bm25Index::build(&docs);
+
+        let mut metadata = HashMap::new();
+        metadata.insert(0, ChunkEntry {
+            chunk_id: "repo#a.rs#func_a".to_string(),
+            kind: ChunkKind::Function,
+            name: "func_a".to_string(),
+            signature: Some("fn func_a()".to_string()),
+            file: "a.rs".to_string(),
+            repo: "repo".to_string(),
+            start_line: 1,
+            end_line: 5,
+            stale: true,
+        });
+        metadata.insert(1, ChunkEntry {
+            chunk_id: "repo#b.rs#func_b".to_string(),
+            kind: ChunkKind::Function,
+            name: "func_b".to_string(),
+            signature: Some("fn func_b()".to_string()),
+            file: "b.rs".to_string(),
+            repo: "repo".to_string(),
+            start_line: 1,
+            end_line: 5,
+            stale: false,
+        });
+
+        let search = HybridSearch::new(hnsw, bm25, metadata);
+        let provider: Box<dyn EmbeddingProvider> = Box::new(MockEmbeddingProvider { dims });
+        let server = McpServer::with_engine(search, provider);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["total_chunks"], 2);
+        let repos = data["source_repos"].as_array().unwrap();
+        assert_eq!(repos[0]["stale_chunks"], 1);
     }
 }

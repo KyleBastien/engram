@@ -51,6 +51,29 @@ impl HybridSearch {
         }
     }
 
+    /// Returns the total number of chunks in the index.
+    pub fn chunk_count(&self) -> usize {
+        self.metadata.len()
+    }
+
+    /// Returns per-repo statistics: (repo_name, chunk_count, stale_count).
+    pub fn repo_stats(&self) -> Vec<(String, usize, usize)> {
+        let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
+        for entry in self.metadata.values() {
+            let (total, stale) = counts.entry(entry.repo.clone()).or_insert((0, 0));
+            *total += 1;
+            if entry.stale {
+                *stale += 1;
+            }
+        }
+        let mut stats: Vec<(String, usize, usize)> = counts
+            .into_iter()
+            .map(|(repo, (total, stale))| (repo, total, stale))
+            .collect();
+        stats.sort_by(|a, b| a.0.cmp(&b.0));
+        stats
+    }
+
     /// Look up a single chunk by its chunk_id.
     pub fn lookup_by_chunk_id(&self, chunk_id: &str) -> Option<&ChunkEntry> {
         self.metadata
