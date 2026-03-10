@@ -306,6 +306,12 @@ dependencies = [
 [[package]]
 name = "engram-cache"
 version = "0.1.0"
+dependencies = [
+ "engram-core",
+ "engram-query",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "engram-cli"
