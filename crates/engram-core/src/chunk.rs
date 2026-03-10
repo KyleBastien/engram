@@ -13,6 +13,7 @@ pub enum ChunkKind {
     DocSection,
     Readme,
     CommentBlock,
+    Knowledge,
     Other,
 }
 
@@ -64,6 +65,7 @@ mod tests {
             (ChunkKind::DocSection, "doc_section"),
             (ChunkKind::Readme, "readme"),
             (ChunkKind::CommentBlock, "comment_block"),
+            (ChunkKind::Knowledge, "knowledge_item"),
             (ChunkKind::Other, "other"),
         ];
 

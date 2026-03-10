@@ -2,8 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use engram_core::{ChunkMetadata, EngramError, Result, StoreConfig};
-use engram_store::{read_chunks_jsonl, read_embeddings_bin, read_manifest};
+use engram_core::{ChunkKind, ChunkMetadata, EngramError, Result, StoreConfig};
+use engram_store::{
+    read_chunks_jsonl, read_embeddings_bin, read_manifest, scan_knowledge_embeddings,
+};
 use sha2::{Digest, Sha256};
 
 use crate::{Bm25Document, Bm25Index, ChunkEntry, HnswIndex, HybridSearch, MetadataIndex};
@@ -18,6 +20,8 @@ pub struct IndexManager {
     metadata: MetadataIndex,
     /// Ordered chunks matching HNSW/BM25 key order (key = index position).
     chunks: Vec<ChunkMetadata>,
+    /// Knowledge items loaded into the HNSW at KNOWLEDGE_KEY_OFFSET.
+    knowledge_chunks: Vec<ChunkMetadata>,
     /// Boot timing in milliseconds.
     pub boot_time_ms: u64,
     /// Whether cache was used during boot ("hit" or "cold").
@@ -56,6 +60,20 @@ impl IndexManager {
             try_load_cache(&cache_dir, &manifest_hash, dimensions)?
         {
             let metadata = MetadataIndex::build(&chunks);
+
+            // On cache hit, also load knowledge embeddings (not cached)
+            let (kn_chunks, kn_vectors) = load_knowledge_vectors(store_root, dimensions)?;
+            if !kn_chunks.is_empty() {
+                // Add knowledge vectors to the loaded HNSW
+                for (i, _) in kn_chunks.iter().enumerate() {
+                    let offset = i * dimensions;
+                    let _ = hnsw.add(
+                        KNOWLEDGE_KEY_OFFSET + i as u64,
+                        &kn_vectors[offset..offset + dimensions],
+                    );
+                }
+            }
+
             let elapsed = start.elapsed();
             eprintln!("Boot completed in {}ms (cache hit)", elapsed.as_millis());
             return Ok(Self {
@@ -63,6 +81,7 @@ impl IndexManager {
                 bm25,
                 metadata,
                 chunks,
+                knowledge_chunks: kn_chunks,
                 boot_time_ms: elapsed.as_millis() as u64,
                 cache_status: "hit".to_string(),
             });
@@ -71,17 +90,29 @@ impl IndexManager {
         // 4. Cold boot — walk index/ directory
         let (all_chunks, all_vectors) = walk_index(store_root, dimensions)?;
 
-        // 5. Build HNSW index
-        let entries: Vec<(u64, &[f32])> = (0..all_chunks.len())
+        // 5. Load knowledge embeddings (partition 2)
+        let (knowledge_chunks, knowledge_vectors) =
+            load_knowledge_vectors(store_root, dimensions)?;
+        let code_count = all_chunks.len();
+
+        // 6. Build HNSW index with code chunks + knowledge items
+        let mut entries: Vec<(u64, &[f32])> = (0..code_count)
             .map(|i| {
                 let offset = i * dimensions;
                 (i as u64, &all_vectors[offset..offset + dimensions])
             })
             .collect();
+        for (i, _chunk) in knowledge_chunks.iter().enumerate() {
+            let offset = i * dimensions;
+            entries.push((
+                KNOWLEDGE_KEY_OFFSET + i as u64,
+                &knowledge_vectors[offset..offset + dimensions],
+            ));
+        }
         let hnsw = HnswIndex::build(&entries, dimensions)?;
 
-        // 6. Build BM25 index
-        let bm25_docs: Vec<Bm25Document> = all_chunks
+        // 7. Build BM25 index with code chunks + knowledge items
+        let mut bm25_docs: Vec<Bm25Document> = all_chunks
             .iter()
             .enumerate()
             .map(|(i, chunk)| Bm25Document {
@@ -91,12 +122,20 @@ impl IndexManager {
                 tags: chunk.tags.clone(),
             })
             .collect();
+        for (i, chunk) in knowledge_chunks.iter().enumerate() {
+            bm25_docs.push(Bm25Document {
+                key: KNOWLEDGE_KEY_OFFSET + i as u64,
+                name: chunk.name.clone(),
+                signature: None,
+                tags: chunk.tags.clone(),
+            });
+        }
         let bm25 = Bm25Index::build(&bm25_docs);
 
-        // 7. Build metadata index
+        // 8. Build metadata index (code chunks only for MetadataIndex)
         let metadata = MetadataIndex::build(&all_chunks);
 
-        // 8. Write compiled cache for next boot
+        // 9. Write compiled cache for next boot (code chunks only)
         write_cache(
             &cache_dir,
             &hnsw,
@@ -106,20 +145,23 @@ impl IndexManager {
             &manifest_hash,
         )?;
 
-        // 9. Report timing
+        // 10. Report timing
         let chunk_count = all_chunks.len();
+        let knowledge_count = knowledge_chunks.len();
         let elapsed = start.elapsed();
         if elapsed.as_secs() >= 1 {
             eprintln!(
-                "Boot completed in {:.1}s (cold, {} chunks)",
+                "Boot completed in {:.1}s (cold, {} chunks, {} knowledge)",
                 elapsed.as_secs_f64(),
-                chunk_count
+                chunk_count,
+                knowledge_count,
             );
         } else {
             eprintln!(
-                "Boot completed in {}ms (cold, {} chunks)",
+                "Boot completed in {}ms (cold, {} chunks, {} knowledge)",
                 elapsed.as_millis(),
-                chunk_count
+                chunk_count,
+                knowledge_count,
             );
         }
 
@@ -128,6 +170,7 @@ impl IndexManager {
             bm25,
             metadata,
             chunks: all_chunks,
+            knowledge_chunks,
             boot_time_ms: elapsed.as_millis() as u64,
             cache_status: "cold".to_string(),
         })
@@ -153,12 +196,18 @@ impl IndexManager {
         self.chunks.len()
     }
 
+    /// Returns the number of knowledge items loaded.
+    pub fn knowledge_count(&self) -> usize {
+        self.knowledge_chunks.len()
+    }
+
     /// Consume the IndexManager and produce a HybridSearch instance.
     ///
     /// Converts the ordered chunk metadata into the HashMap<u64, ChunkEntry>
     /// that HybridSearch expects, where keys match the HNSW/BM25 index positions.
+    /// Knowledge items are included with keys offset by `KNOWLEDGE_KEY_OFFSET`.
     pub fn into_hybrid_search(self) -> HybridSearch {
-        let metadata = self
+        let mut metadata: std::collections::HashMap<u64, ChunkEntry> = self
             .chunks
             .into_iter()
             .enumerate()
@@ -180,6 +229,25 @@ impl IndexManager {
                 )
             })
             .collect();
+
+        // Add knowledge items at KNOWLEDGE_KEY_OFFSET
+        for (i, chunk) in self.knowledge_chunks.into_iter().enumerate() {
+            metadata.insert(
+                KNOWLEDGE_KEY_OFFSET + i as u64,
+                ChunkEntry {
+                    chunk_id: chunk.chunk_id,
+                    kind: ChunkKind::Knowledge,
+                    name: chunk.name,
+                    signature: None,
+                    file: String::new(),
+                    repo: "knowledge".to_string(),
+                    start_line: 0,
+                    end_line: 0,
+                    stale: false,
+                },
+            );
+        }
+
         HybridSearch::new(self.hnsw, self.bm25, metadata)
     }
 }
@@ -265,6 +333,51 @@ fn collect_chunk_files(dir: &Path, results: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Key offset for knowledge items in the HNSW index (partition 2).
+///
+/// Knowledge item keys start at this value to separate them from code chunk keys
+/// (partition 0/1). This allows future partition-based filtering by key range.
+pub const KNOWLEDGE_KEY_OFFSET: u64 = 2_000_000;
+
+/// Load knowledge embedding vectors from the store.
+///
+/// Scans `knowledge/` for items with `.embedding.bin` files, reads the binary
+/// vectors, and returns synthetic `ChunkMetadata` entries alongside the flat
+/// vector buffer. Each knowledge item produces one vector and one metadata entry.
+fn load_knowledge_vectors(
+    store_root: &Path,
+    dimensions: usize,
+) -> Result<(Vec<ChunkMetadata>, Vec<f32>)> {
+    let infos = scan_knowledge_embeddings(store_root)?;
+    let mut chunks = Vec::new();
+    let mut vectors = Vec::new();
+
+    for info in &infos {
+        let emb_file = read_embeddings_bin(&info.embedding_path)?;
+        if emb_file.dimensions != dimensions || emb_file.vectors.len() < dimensions {
+            continue;
+        }
+
+        vectors.extend_from_slice(&emb_file.vectors[..dimensions]);
+
+        chunks.push(ChunkMetadata {
+            chunk_id: format!("knowledge#{}:{}", info.kind, info.id),
+            kind: ChunkKind::Knowledge,
+            name: info.title.clone(),
+            signature: None,
+            start_line: 0,
+            end_line: 0,
+            content_hash: String::new(),
+            tags: vec![info.kind.clone()],
+            indexed_at: info.created_at.clone(),
+            source_commit: String::new(),
+            embedding_offset: 0,
+        });
+    }
+
+    Ok((chunks, vectors))
 }
 
 // --- Inline cache functions (engram-cache depends on engram-query, so we inline to avoid cycles) ---
@@ -513,6 +626,50 @@ mod tests {
         assert!(mgr.metadata().lookup_by_id("repo#src/a.rs#alpha").is_some());
         assert!(mgr.metadata().lookup_by_id("repo#src/b.rs#beta").is_some());
         assert!(mgr.metadata().lookup_by_id("repo#src/b.rs#gamma").is_some());
+    }
+
+    #[tokio::test]
+    async fn boot_loads_knowledge_embeddings_in_partition_2() {
+        use engram_core::Decision;
+        use engram_store::write_decision_with_embedding;
+
+        let tmp = TempDir::new().unwrap();
+        let dims = 32;
+        let store_root = setup_store(&tmp, dims);
+
+        // Write a knowledge decision with embedding
+        let decision = Decision {
+            id: "DEC-001".to_string(),
+            title: "Use HNSW for search".to_string(),
+            status: "accepted".to_string(),
+            context: "Need fast vector search".to_string(),
+            decision: "Use HNSW".to_string(),
+            consequences: vec![],
+            related_files: vec![],
+            contributed_by: "test".to_string(),
+            created_at: "2026-03-10T00:00:00Z".to_string(),
+            embedding_ref: None,
+        };
+        let emb = make_vector(dims, 42.0);
+        write_decision_with_embedding(&store_root, &decision, &emb, dims).unwrap();
+
+        let config = StoreConfig::default();
+        let mgr = IndexManager::boot(&store_root, &config).await.unwrap();
+
+        // 2 code chunks + 1 knowledge item = 3 vectors in HNSW
+        assert_eq!(mgr.hnsw().len(), 3);
+        assert_eq!(mgr.chunk_count(), 2);
+        assert_eq!(mgr.knowledge_count(), 1);
+
+        // Knowledge vector is searchable in HNSW
+        let results = mgr.hnsw().search(&emb, 3).unwrap();
+        // The knowledge key should be KNOWLEDGE_KEY_OFFSET + 0
+        let knowledge_key = results.iter().find(|(k, _)| *k >= KNOWLEDGE_KEY_OFFSET);
+        assert!(knowledge_key.is_some(), "knowledge item should be in HNSW results");
+
+        // into_hybrid_search should include knowledge metadata
+        let hybrid = mgr.into_hybrid_search();
+        assert_eq!(hybrid.chunk_count(), 3); // 2 code + 1 knowledge
     }
 
     #[tokio::test]

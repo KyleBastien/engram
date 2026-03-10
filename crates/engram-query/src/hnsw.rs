@@ -100,6 +100,17 @@ impl HnswIndex {
         Ok(Self { index, dimensions })
     }
 
+    /// Add a single vector to the index after initial build.
+    pub fn add(&self, key: u64, vector: &[f32]) -> Result<()> {
+        self.index
+            .reserve(self.index.size() + 1)
+            .map_err(|e| EngramError::Index(format!("failed to reserve for add: {e}")))?;
+        self.index
+            .add(key, vector)
+            .map_err(|e| EngramError::Index(format!("failed to add vector {key}: {e}")))?;
+        Ok(())
+    }
+
     /// Returns the number of vectors in the index.
     pub fn len(&self) -> usize {
         self.index.size()
