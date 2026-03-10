@@ -8,4 +8,5 @@ members = [
     "crates/engram-store",
     "crates/engram-cache",
     "crates/engram-cli",
+    "crates/engram-providers/ollama",
 ]
