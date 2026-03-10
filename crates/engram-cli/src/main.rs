@@ -9,7 +9,7 @@ use engram_core::{EmbeddingProvider, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
 use engram_mcp::McpServer;
 use engram_query::IndexManager;
-use engram_store::Store;
+use engram_store::{read_manifest, Store};
 
 mod provider;
 
@@ -54,6 +54,13 @@ enum Commands {
         local: bool,
 
         /// Path for the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
+    /// Check store health and index status
+    Status {
+        /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
         path: PathBuf,
     },
@@ -195,6 +202,101 @@ async fn main() {
                 }
             }
         }
+        Commands::Status { path } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            let config = match load_config(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let manifest = match read_manifest(&path) {
+                Ok(Some(m)) => Some(m),
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("Warning: could not read manifest: {e}");
+                    None
+                }
+            };
+
+            // Chunk count
+            let chunk_count = manifest.as_ref().map_or(0, |m| m.chunk_count);
+            println!("Engram Store Status");
+            println!("===================");
+            println!("Store path:         {}", path.display());
+            println!("Chunks indexed:     {chunk_count}");
+
+            // Source repos
+            println!("\nSource Repositories:");
+            if config.sources.is_empty() {
+                println!("  (none configured)");
+            } else {
+                for source in &config.sources {
+                    println!("  {} ({})", source.name, source.path);
+                }
+            }
+
+            // Last indexed commit
+            println!("\nLast Indexed Commit:");
+            match manifest.as_ref().and_then(|m| m.last_indexed_commit.as_deref()) {
+                Some(commit) => println!("  {commit}"),
+                None => println!("  (not yet indexed)"),
+            }
+
+            // Staleness summary
+            println!("\nStaleness:");
+            if config.sources.is_empty() {
+                println!("  (no sources to check)");
+            } else {
+                let indexed_commit = manifest
+                    .as_ref()
+                    .and_then(|m| m.last_indexed_commit.as_deref());
+                for source in &config.sources {
+                    let source_path = Path::new(&source.path);
+                    let status = if indexed_commit.is_none() {
+                        "not indexed".to_string()
+                    } else if !source_path.exists() {
+                        "source path not found".to_string()
+                    } else {
+                        match git2::Repository::open(source_path) {
+                            Ok(repo) => match repo.head().and_then(|r| r.peel_to_commit()) {
+                                Ok(head) => {
+                                    let head_hex = head.id().to_string();
+                                    if indexed_commit == Some(head_hex.as_str()) {
+                                        "up to date".to_string()
+                                    } else {
+                                        format!("stale (HEAD: {})", &head_hex[..8.min(head_hex.len())])
+                                    }
+                                }
+                                Err(_) => "could not read HEAD".to_string(),
+                            },
+                            Err(_) => "not a git repository".to_string(),
+                        }
+                    };
+                    println!("  {}: {status}", source.name);
+                }
+            }
+
+            // Cache status
+            let cache_exists = path.join(".engram-cache").join("fingerprint").exists();
+            println!(
+                "\nCache:              {}",
+                if cache_exists { "warm" } else { "cold" }
+            );
+
+            // Embedding provider
+            println!(
+                "Embedding provider: {}/{}",
+                config.embedding.provider, config.embedding.model
+            );
+        }
         Commands::Init { local, path } => {
             if !local {
                 eprintln!("Error: --local flag is required for init");
@@ -287,6 +389,9 @@ mod tests {
     use engram_core::{EmbedError, EmbeddingProvider, SourceConfig, StoreConfig};
     use engram_store::Store;
     use tempfile::TempDir;
+
+    use engram_core::Manifest;
+    use engram_store::{read_manifest, write_manifest};
 
     use super::{load_config, run_reindex, Cli, Commands, Transport};
 
@@ -812,5 +917,125 @@ mod tests {
             }
             _ => panic!("expected Serve command"),
         }
+    }
+
+    // --- Status command tests ---
+
+    #[test]
+    fn test_status_default_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "status"]);
+        match cli.command {
+            Commands::Status { path } => {
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Status command"),
+        }
+    }
+
+    #[test]
+    fn test_status_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "status", "--path", "/tmp/my-store"]);
+        match cli.command {
+            Commands::Status { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/my-store"));
+            }
+            _ => panic!("expected Status command"),
+        }
+    }
+
+    #[test]
+    fn test_status_reads_config() {
+        let sources = vec![SourceConfig {
+            name: "my-project".to_string(),
+            path: "/tmp/project".to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+        let (_dir, store_path) = init_store_with_sources(sources);
+        let config = load_config(&store_path).unwrap();
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].name, "my-project");
+    }
+
+    #[test]
+    fn test_status_reads_manifest() {
+        let (_dir, store_path) = init_store_with_sources(vec![]);
+        let manifest = Manifest {
+            chunk_count: 42,
+            last_indexed_commit: Some("abc123".to_string()),
+            model_name: "nomic-embed-text".to_string(),
+            dimensions: 768,
+            source_repos: vec!["my-repo".to_string()],
+            created_at: "2026-03-09T00:00:00Z".to_string(),
+            updated_at: "2026-03-09T12:00:00Z".to_string(),
+        };
+        write_manifest(&store_path, &manifest).unwrap();
+
+        let read = read_manifest(&store_path).unwrap().unwrap();
+        assert_eq!(read.chunk_count, 42);
+        assert_eq!(read.last_indexed_commit, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_status_no_manifest_returns_none() {
+        let (_dir, store_path) = init_store_with_sources(vec![]);
+        // No manifest written — should return None
+        let result = read_manifest(&store_path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_status_cache_detection() {
+        let (_dir, store_path) = init_store_with_sources(vec![]);
+        // No cache yet
+        assert!(!store_path.join(".engram-cache").join("fingerprint").exists());
+
+        // Create cache fingerprint
+        let cache_dir = store_path.join(".engram-cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("fingerprint"), "test-hash").unwrap();
+        assert!(store_path.join(".engram-cache").join("fingerprint").exists());
+    }
+
+    #[test]
+    fn test_status_no_store_detection() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("nonexistent");
+        assert!(!path.join(".engram").exists());
+    }
+
+    #[test]
+    fn test_status_staleness_check_with_source_repo() {
+        let (_src, src_path) = setup_source_repo(&[("lib.rs", "fn hello() {}")]);
+
+        // Get the HEAD commit OID
+        let repo = git2::Repository::open(&src_path).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let head_oid = head.id().to_string();
+
+        // Create store with manifest matching the HEAD
+        let sources = vec![SourceConfig {
+            name: "test-repo".to_string(),
+            path: src_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+        let (_dir, store_path) = init_store_with_sources(sources);
+        let manifest = Manifest {
+            chunk_count: 1,
+            last_indexed_commit: Some(head_oid.clone()),
+            model_name: "test".to_string(),
+            dimensions: 768,
+            source_repos: vec![src_path.to_string_lossy().to_string()],
+            created_at: "2026-03-09T00:00:00Z".to_string(),
+            updated_at: "2026-03-09T12:00:00Z".to_string(),
+        };
+        write_manifest(&store_path, &manifest).unwrap();
+
+        // Verify: indexed commit matches HEAD — should be "up to date"
+        let read = read_manifest(&store_path).unwrap().unwrap();
+        assert_eq!(read.last_indexed_commit.as_deref(), Some(head_oid.as_str()));
     }
 }
