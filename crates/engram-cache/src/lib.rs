@@ -51,6 +51,19 @@ pub fn write_cache(
     Ok(())
 }
 
+/// Invalidate the compiled index cache by removing the fingerprint file.
+///
+/// After invalidation, `try_load_cache` will return `None` on the next call.
+/// This is a no-op if the fingerprint file does not exist.
+pub fn invalidate_cache(cache_dir: &Path) -> Result<()> {
+    let fingerprint_path = cache_dir.join("fingerprint");
+    match fs::remove_file(&fingerprint_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Try to load a compiled index cache, validating its fingerprint.
 ///
 /// Returns `None` (cache miss) if:
@@ -308,6 +321,62 @@ mod tests {
 
         let result = try_load_cache(&cache_dir, "hash").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn invalidate_cache_removes_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let hnsw = HnswIndex::build(&[], 32).unwrap();
+        let bm25 = Bm25Index::build(&[]);
+        write_cache(&cache_dir, &hnsw, &bm25, &[], "hash").unwrap();
+
+        assert!(cache_dir.join("fingerprint").exists());
+        invalidate_cache(&cache_dir).unwrap();
+        assert!(!cache_dir.join("fingerprint").exists());
+    }
+
+    #[test]
+    fn invalidate_cache_then_try_load_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let dims = 32;
+        let v0 = make_vector(dims, 0.0);
+        let entries: Vec<(u64, &[f32])> = vec![(0, &v0)];
+        let hnsw = HnswIndex::build(&entries, dims).unwrap();
+
+        let docs = vec![Bm25Document {
+            key: 0,
+            name: "foo".to_string(),
+            signature: Some("fn foo()".to_string()),
+            tags: vec![],
+        }];
+        let bm25 = Bm25Index::build(&docs);
+        let chunks = vec![make_chunk("repo#src/lib.rs#foo", "foo")];
+
+        write_cache(&cache_dir, &hnsw, &bm25, &chunks, "myhash").unwrap();
+
+        // Cache should be valid before invalidation
+        let result = try_load_cache(&cache_dir, "myhash").unwrap();
+        assert!(result.is_some());
+
+        // Invalidate
+        invalidate_cache(&cache_dir).unwrap();
+
+        // Cache should miss after invalidation
+        let result = try_load_cache(&cache_dir, "myhash").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn invalidate_cache_noop_when_no_cache() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("nonexistent");
+
+        // Should not error even if directory doesn't exist
+        invalidate_cache(&cache_dir).unwrap();
     }
 
     #[test]
