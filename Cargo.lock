@@ -385,6 +385,8 @@ dependencies = [
  "clap",
  "engram-core",
  "engram-ingest",
+ "engram-mcp",
+ "engram-query",
  "engram-store",
  "git2",
  "reqwest",

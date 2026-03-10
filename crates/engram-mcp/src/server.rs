@@ -78,6 +78,15 @@ impl McpServer {
         }
     }
 
+    /// Set boot info on the engine state (boot timing, store path, cache status).
+    pub fn set_boot_info(&mut self, boot_time_ms: u64, store_path: String, cache_status: String) {
+        if let Some(ref mut state) = self.state {
+            state.boot_time_ms = boot_time_ms;
+            state.store_path = store_path;
+            state.cache_status = cache_status;
+        }
+    }
+
     /// Run the MCP server, reading JSON-RPC requests from the provided reader
     /// and writing responses to the provided writer. Logs go to stderr.
     pub async fn run<R, W>(&self, reader: R, mut writer: W) -> engram_core::Result<()>

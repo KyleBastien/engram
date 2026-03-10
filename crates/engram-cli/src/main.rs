@@ -1,10 +1,14 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use engram_core::{EmbeddingProvider, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
+use engram_mcp::McpServer;
+use engram_query::IndexManager;
 use engram_store::Store;
 
 mod provider;
@@ -16,8 +20,33 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Clone, ValueEnum)]
+enum Transport {
+    Stdio,
+    Sse,
+}
+
 #[derive(Subcommand)]
 enum Commands {
+    /// Start the MCP server
+    Serve {
+        /// Transport protocol (stdio or sse)
+        #[arg(long, default_value = "stdio")]
+        transport: Transport,
+
+        /// Port for SSE transport (only used with --transport sse)
+        #[arg(long, default_value = "3000")]
+        port: u16,
+
+        /// Server context name
+        #[arg(long, default_value = "default")]
+        context: String,
+
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
     /// Initialize a new semantic store
     Init {
         /// Create a local store
@@ -95,6 +124,77 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Serve {
+            transport,
+            port: _port,
+            context,
+            path,
+        } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            let config = match load_config(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            eprintln!("engram: booting index from {}...", path.display());
+            let boot_start = Instant::now();
+
+            let index_manager = match IndexManager::boot(&path, &config).await {
+                Ok(mgr) => mgr,
+                Err(e) => {
+                    eprintln!("Error: failed to boot index: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let boot_ms = boot_start.elapsed().as_millis();
+            let chunk_count = index_manager.chunk_count();
+            let cache_status = index_manager.cache_status.clone();
+
+            eprintln!(
+                "engram: index loaded — {} chunks, {}ms (cache: {})",
+                chunk_count, boot_ms, cache_status
+            );
+
+            let provider = provider::OllamaProvider::from_config(&config.embedding);
+
+            // Build source_roots from config sources
+            let source_roots: HashMap<String, PathBuf> = config
+                .sources
+                .iter()
+                .map(|s| (s.name.clone(), PathBuf::from(&s.path)))
+                .collect();
+
+            let search = index_manager.into_hybrid_search();
+            let mut server =
+                McpServer::with_engine_and_sources(search, Box::new(provider), source_roots);
+            server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status);
+
+            eprintln!("engram: serving on stdio (context: {context})");
+
+            match transport {
+                Transport::Stdio => {
+                    let stdin = tokio::io::stdin();
+                    let stdout = tokio::io::stdout();
+                    if let Err(e) = server.run(stdin, stdout).await {
+                        eprintln!("Error: MCP server error: {e}");
+                        process::exit(1);
+                    }
+                }
+                Transport::Sse => {
+                    eprintln!("Error: SSE transport is not yet implemented (Phase 1 only supports stdio)");
+                    process::exit(1);
+                }
+            }
+        }
         Commands::Init { local, path } => {
             if !local {
                 eprintln!("Error: --local flag is required for init");
@@ -188,7 +288,7 @@ mod tests {
     use engram_store::Store;
     use tempfile::TempDir;
 
-    use super::{load_config, run_reindex, Cli, Commands};
+    use super::{load_config, run_reindex, Cli, Commands, Transport};
 
     // --- Mock embedding provider for tests ---
 
@@ -601,5 +701,116 @@ mod tests {
         // Verify the store was created with expected structure
         let version = fs::read_to_string(store_path.join(".engram/version")).unwrap();
         assert_eq!(version, "1.0.0");
+    }
+
+    // --- Serve command arg parsing tests ---
+
+    #[test]
+    fn test_serve_defaults() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "serve"]);
+        match cli.command {
+            Commands::Serve {
+                transport,
+                port,
+                context,
+                path,
+            } => {
+                assert!(matches!(transport, Transport::Stdio));
+                assert_eq!(port, 3000);
+                assert_eq!(context, "default");
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_stdio_transport() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "serve", "--transport", "stdio"]);
+        match cli.command {
+            Commands::Serve { transport, .. } => {
+                assert!(matches!(transport, Transport::Stdio));
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_sse_transport_with_port() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "serve",
+            "--transport",
+            "sse",
+            "--port",
+            "8080",
+        ]);
+        match cli.command {
+            Commands::Serve {
+                transport, port, ..
+            } => {
+                assert!(matches!(transport, Transport::Sse));
+                assert_eq!(port, 8080);
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_custom_context() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "serve", "--context", "my-project"]);
+        match cli.command {
+            Commands::Serve { context, .. } => {
+                assert_eq!(context, "my-project");
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "serve", "--path", "/tmp/my-store"]);
+        match cli.command {
+            Commands::Serve { path, .. } => {
+                assert_eq!(path, PathBuf::from("/tmp/my-store"));
+            }
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_serve_all_flags() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "serve",
+            "--transport",
+            "sse",
+            "--port",
+            "9090",
+            "--context",
+            "workspace",
+            "--path",
+            "/opt/store",
+        ]);
+        match cli.command {
+            Commands::Serve {
+                transport,
+                port,
+                context,
+                path,
+            } => {
+                assert!(matches!(transport, Transport::Sse));
+                assert_eq!(port, 9090);
+                assert_eq!(context, "workspace");
+                assert_eq!(path, PathBuf::from("/opt/store"));
+            }
+            _ => panic!("expected Serve command"),
+        }
     }
 }

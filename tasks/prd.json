@@ -1,7 +1,7 @@
 {
   "project": "Engram",
   "branchName": "ralph/engram",
-  "description": "Git-backed semantic context MCP server for AI coding agents — Rust binary with tree-sitter chunking, HNSW+BM25 hybrid search, knowledge write-back, and live dashboard",
+  "description": "Git-backed semantic context MCP server for AI coding agents \u2014 Rust binary with tree-sitter chunking, HNSW+BM25 hybrid search, knowledge write-back, and live dashboard",
   "userStories": [
     {
       "id": "US-001",
@@ -272,7 +272,7 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -289,7 +289,7 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -306,7 +306,7 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -323,7 +323,7 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -342,7 +342,7 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -352,12 +352,12 @@
       "acceptanceCriteria": [
         "engram-ingest exports content_hash(content) returning hex-encoded SHA-256 hash",
         "engram-ingest exports has_chunk_changed(old_hash, new_hash) -> bool",
-        "Hashing is deterministic — same content always produces same hash",
+        "Hashing is deterministic \u2014 same content always produces same hash",
         "cargo test -p engram-ingest passes",
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -373,7 +373,7 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -389,7 +389,7 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -407,7 +407,7 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -425,7 +425,7 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -443,7 +443,7 @@
         "Typecheck passes"
       ],
       "priority": 26,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -459,7 +459,7 @@
         "Typecheck passes"
       ],
       "priority": 27,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -474,7 +474,7 @@
         "Typecheck passes"
       ],
       "priority": 28,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -490,7 +490,7 @@
         "Typecheck passes"
       ],
       "priority": 29,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -504,7 +504,7 @@
         "Typecheck passes"
       ],
       "priority": 30,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -520,7 +520,7 @@
         "Typecheck passes"
       ],
       "priority": 31,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -536,7 +536,7 @@
         "Typecheck passes"
       ],
       "priority": 32,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -553,7 +553,7 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -571,7 +571,7 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -590,7 +590,7 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -605,7 +605,7 @@
         "Typecheck passes"
       ],
       "priority": 36,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -622,7 +622,7 @@
         "Typecheck passes"
       ],
       "priority": 37,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -639,7 +639,7 @@
         "Typecheck passes"
       ],
       "priority": 38,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -657,7 +657,7 @@
         "Typecheck passes"
       ],
       "priority": 39,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -1000,7 +1000,7 @@
         "Writes YAML files to knowledge/onboarding/: project-overview.yaml, build-test-commands.yaml, architecture-map.yaml, key-abstractions.yaml",
         "Embeds all onboarding knowledge files for searchability",
         "Commits to store with descriptive message",
-        "Onboarding is idempotent — re-running overwrites existing files",
+        "Onboarding is idempotent \u2014 re-running overwrites existing files",
         "cargo test -p engram-ingest passes",
         "Typecheck passes"
       ],
@@ -1033,7 +1033,7 @@
         "Optional parameters: task_description",
         "Returns structured prompt with: summary of searches performed (count, queries), total tokens consumed, count and types of knowledge items surfaced, structured evaluation question",
         "Tracks session search history in-memory",
-        "Does NOT perform any search itself — it's a reflection tool",
+        "Does NOT perform any search itself \u2014 it's a reflection tool",
         "cargo test -p engram-mcp passes",
         "Typecheck passes"
       ],
@@ -1483,7 +1483,7 @@
     },
     {
       "id": "US-089",
-      "title": "Build dashboard frontend — Live Session View",
+      "title": "Build dashboard frontend \u2014 Live Session View",
       "description": "As a developer, I need the Live Session View page showing active MCP connections and real-time search activity.",
       "acceptanceCriteria": [
         "Static HTML/JS page connecting to WebSocket endpoint",
@@ -1501,7 +1501,7 @@
     },
     {
       "id": "US-090",
-      "title": "Build dashboard frontend — Index Health View",
+      "title": "Build dashboard frontend \u2014 Index Health View",
       "description": "As a developer, I need the Index Health View page showing the state of the semantic index.",
       "acceptanceCriteria": [
         "Shows total chunks indexed per source repo",
@@ -1519,7 +1519,7 @@
     },
     {
       "id": "US-091",
-      "title": "Build dashboard frontend — Knowledge Activity View",
+      "title": "Build dashboard frontend \u2014 Knowledge Activity View",
       "description": "As a developer, I need the Knowledge Activity View showing recent write-backs and knowledge item counts.",
       "acceptanceCriteria": [
         "Shows recent write-backs (decisions, lessons, patterns) with timestamps and titles",
@@ -1535,7 +1535,7 @@
     },
     {
       "id": "US-092",
-      "title": "Build dashboard frontend — Search Analytics View",
+      "title": "Build dashboard frontend \u2014 Search Analytics View",
       "description": "As a developer, I need the Search Analytics View showing search patterns and quality over time.",
       "acceptanceCriteria": [
         "Shows query frequency over time (line chart)",
@@ -1551,7 +1551,7 @@
     },
     {
       "id": "US-093",
-      "title": "Build dashboard frontend — Benchmark Dashboard View",
+      "title": "Build dashboard frontend \u2014 Benchmark Dashboard View",
       "description": "As a developer, I need the Benchmark Dashboard View showing benchmark results and trends.",
       "acceptanceCriteria": [
         "Shows active benchmark sessions with live event counts",

@@ -6,7 +6,7 @@ use engram_core::{ChunkMetadata, EngramError, Result, StoreConfig};
 use engram_store::{read_chunks_jsonl, read_embeddings_bin, read_manifest};
 use sha2::{Digest, Sha256};
 
-use crate::{Bm25Document, Bm25Index, HnswIndex, MetadataIndex};
+use crate::{Bm25Document, Bm25Index, ChunkEntry, HnswIndex, HybridSearch, MetadataIndex};
 
 /// The live in-memory index manager holding HNSW, BM25, and metadata indexes.
 ///
@@ -16,6 +16,12 @@ pub struct IndexManager {
     hnsw: HnswIndex,
     bm25: Bm25Index,
     metadata: MetadataIndex,
+    /// Ordered chunks matching HNSW/BM25 key order (key = index position).
+    chunks: Vec<ChunkMetadata>,
+    /// Boot timing in milliseconds.
+    pub boot_time_ms: u64,
+    /// Whether cache was used during boot ("hit" or "cold").
+    pub cache_status: String,
 }
 
 impl IndexManager {
@@ -56,6 +62,9 @@ impl IndexManager {
                 hnsw,
                 bm25,
                 metadata,
+                chunks,
+                boot_time_ms: elapsed.as_millis() as u64,
+                cache_status: "hit".to_string(),
             });
         }
 
@@ -118,6 +127,9 @@ impl IndexManager {
             hnsw,
             bm25,
             metadata,
+            chunks: all_chunks,
+            boot_time_ms: elapsed.as_millis() as u64,
+            cache_status: "cold".to_string(),
         })
     }
 
@@ -134,6 +146,56 @@ impl IndexManager {
     /// Access the metadata lookup index.
     pub fn metadata(&self) -> &MetadataIndex {
         &self.metadata
+    }
+
+    /// Returns the total number of indexed chunks.
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Consume the IndexManager and produce a HybridSearch instance.
+    ///
+    /// Converts the ordered chunk metadata into the HashMap<u64, ChunkEntry>
+    /// that HybridSearch expects, where keys match the HNSW/BM25 index positions.
+    pub fn into_hybrid_search(self) -> HybridSearch {
+        let metadata = self
+            .chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let (repo, file) = extract_repo_file(&chunk.chunk_id);
+                (
+                    i as u64,
+                    ChunkEntry {
+                        chunk_id: chunk.chunk_id,
+                        kind: chunk.kind,
+                        name: chunk.name,
+                        signature: chunk.signature,
+                        file,
+                        repo,
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        stale: false,
+                    },
+                )
+            })
+            .collect();
+        HybridSearch::new(self.hnsw, self.bm25, metadata)
+    }
+}
+
+/// Extract repo name and file path from a chunk_id.
+///
+/// chunk_id format: `{repo}#{file_path}#{chunk_name}`
+fn extract_repo_file(chunk_id: &str) -> (String, String) {
+    let first = chunk_id.find('#');
+    let last = chunk_id.rfind('#');
+    match (first, last) {
+        (Some(f), Some(l)) if f < l => (
+            chunk_id[..f].to_string(),
+            chunk_id[f + 1..l].to_string(),
+        ),
+        _ => ("unknown".to_string(), chunk_id.to_string()),
     }
 }
 
