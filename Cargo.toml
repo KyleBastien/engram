@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engram-core",
+    "crates/engram-ingest",
+    "crates/engram-query",
+    "crates/engram-mcp",
+    "crates/engram-store",
+    "crates/engram-cache",
+    "crates/engram-cli",
+]

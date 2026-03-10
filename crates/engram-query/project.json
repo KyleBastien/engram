@@ -1,0 +1,26 @@
+{
+  "name": "engram-query",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build -p engram-query",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test -p engram-query",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p engram-query -- -D warnings",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

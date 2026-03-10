@@ -1,0 +1,26 @@
+{
+  "name": "engram-cli",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build -p engram-cli",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test -p engram-cli",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p engram-cli -- -D warnings",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}
