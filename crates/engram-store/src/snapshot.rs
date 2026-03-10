@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use engram_core::{EngramError, Result, Snapshot, SnapshotTier};
 
@@ -202,6 +203,121 @@ pub fn scan_snapshot_embeddings(store_root: &Path) -> Result<Vec<SnapshotEmbeddi
     // Sort by session_id for deterministic ordering
     results.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     Ok(results)
+}
+
+/// Report returned by [`compact_snapshots`] with counts of promoted snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactReport {
+    /// Number of active snapshots compressed and moved to `compressed/`.
+    pub active_to_compressed: usize,
+    /// Number of compressed snapshots moved to `archived/`.
+    pub compressed_to_archived: usize,
+}
+
+/// Age threshold for promoting active → compressed (7 days).
+const ACTIVE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Age threshold for promoting compressed → archived (90 days).
+const COMPRESSED_MAX_AGE: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// Determine a file's age by its filesystem modified time.
+fn file_age(path: &Path) -> Result<Duration> {
+    let metadata = fs::metadata(path)?;
+    let modified = metadata
+        .modified()
+        .map_err(|e| EngramError::Store(format!("cannot read mtime: {e}")))?;
+    Ok(SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO))
+}
+
+/// Compact snapshots by promoting them through tiers based on age.
+///
+/// - Snapshots in `active/` older than 7 days are zstd-compressed and moved to
+///   `compressed/` (original deleted).
+/// - Snapshots in `compressed/` older than 90 days are moved to `archived/`.
+///
+/// Returns a [`CompactReport`] with promotion counts.
+pub fn compact_snapshots(store_root: &Path) -> Result<CompactReport> {
+    let mut report = CompactReport {
+        active_to_compressed: 0,
+        compressed_to_archived: 0,
+    };
+
+    let active_dir = store_root.join("snapshots/active");
+    let compressed_dir = store_root.join("snapshots/compressed");
+    let archived_dir = store_root.join("snapshots/archived");
+
+    // Ensure target directories exist
+    fs::create_dir_all(&compressed_dir)?;
+    fs::create_dir_all(&archived_dir)?;
+
+    // Phase 1: active → compressed (zstd compress .yaml files older than 7 days)
+    if active_dir.is_dir() {
+        for entry in fs::read_dir(&active_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+
+            if !fname.ends_with(".yaml") {
+                continue;
+            }
+
+            if file_age(&path)? >= ACTIVE_MAX_AGE {
+                let yaml_bytes = fs::read(&path)?;
+                let compressed = zstd::encode_all(&yaml_bytes[..], 3)
+                    .map_err(|e| EngramError::Store(format!("zstd compress error: {e}")))?;
+
+                let dest = compressed_dir.join(format!("{fname}.zst"));
+                fs::write(&dest, compressed)?;
+
+                // Move associated embedding file if present
+                let emb_path = snapshot_embedding_path(&path);
+                if emb_path.exists() {
+                    let emb_dest = compressed_dir.join(
+                        emb_path.file_name().unwrap(),
+                    );
+                    fs::rename(&emb_path, &emb_dest)?;
+                }
+
+                fs::remove_file(&path)?;
+                report.active_to_compressed += 1;
+            }
+        }
+    }
+
+    // Phase 2: compressed → archived (move files older than 90 days)
+    if compressed_dir.is_dir() {
+        for entry in fs::read_dir(&compressed_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+
+            // Only process .yaml.zst snapshot files (not embedding bins)
+            if !fname.ends_with(".yaml.zst") {
+                continue;
+            }
+
+            if file_age(&path)? >= COMPRESSED_MAX_AGE {
+                let dest = archived_dir.join(fname.as_ref());
+                fs::rename(&path, &dest)?;
+
+                // Move associated embedding file if present
+                // Embedding files use the original yaml stem, e.g. foo.embedding.bin
+                let stem = fname.trim_end_matches(".yaml.zst");
+                let emb_name = format!("{stem}.embedding.bin");
+                let emb_path = compressed_dir.join(&emb_name);
+                if emb_path.exists() {
+                    let emb_dest = archived_dir.join(&emb_name);
+                    fs::rename(&emb_path, &emb_dest)?;
+                }
+
+                report.compressed_to_archived += 1;
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -471,5 +587,176 @@ mod tests {
         assert_eq!(tier_dir_name(&SnapshotTier::Active), "active");
         assert_eq!(tier_dir_name(&SnapshotTier::Compressed), "compressed");
         assert_eq!(tier_dir_name(&SnapshotTier::Archived), "archived");
+    }
+
+    /// Helper: set a file's modified time to `age` ago from now.
+    fn set_file_age(path: &Path, age: Duration) {
+        use std::fs::{File, FileTimes};
+        use std::time::SystemTime;
+        let mtime = SystemTime::now() - age;
+        let times = FileTimes::new().set_modified(mtime);
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_times(times).unwrap();
+    }
+
+    #[test]
+    fn test_compact_no_old_snapshots() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_snapshot_dirs(root);
+
+        // Write a fresh snapshot (age < 7 days)
+        let snapshot = sample_snapshot();
+        write_snapshot(root, &snapshot).unwrap();
+
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 0);
+        assert_eq!(report.compressed_to_archived, 0);
+
+        // Original file still in active/
+        assert!(root
+            .join("snapshots/active/2026-03-09T14-30-00Z_session-001.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn test_compact_active_to_compressed() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_snapshot_dirs(root);
+
+        let snapshot = sample_snapshot();
+        let yaml_path = write_snapshot(root, &snapshot).unwrap();
+
+        // Make the file 8 days old
+        set_file_age(&yaml_path, Duration::from_secs(8 * 24 * 60 * 60));
+
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 1);
+        assert_eq!(report.compressed_to_archived, 0);
+
+        // Original removed from active/
+        assert!(!yaml_path.exists());
+
+        // Compressed file exists in compressed/
+        let compressed_path = root.join(
+            "snapshots/compressed/2026-03-09T14-30-00Z_session-001.yaml.zst",
+        );
+        assert!(compressed_path.exists());
+
+        // Verify the compressed content is valid
+        let compressed = fs::read(&compressed_path).unwrap();
+        let mut decoder = zstd::Decoder::new(&compressed[..]).unwrap();
+        let mut yaml = String::new();
+        decoder.read_to_string(&mut yaml).unwrap();
+        let loaded: Snapshot = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(loaded.session_id, "session-001");
+    }
+
+    #[test]
+    fn test_compact_compressed_to_archived() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_snapshot_dirs(root);
+
+        // Place a .yaml.zst file in compressed/ tier
+        let snapshot = sample_snapshot();
+        let yaml = serde_yaml::to_string(&snapshot).unwrap();
+        let compressed_data = zstd::encode_all(yaml.as_bytes(), 3).unwrap();
+        let compressed_path = root.join(
+            "snapshots/compressed/2026-03-09T14-30-00Z_session-001.yaml.zst",
+        );
+        fs::write(&compressed_path, compressed_data).unwrap();
+
+        // Make it 91 days old
+        set_file_age(&compressed_path, Duration::from_secs(91 * 24 * 60 * 60));
+
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 0);
+        assert_eq!(report.compressed_to_archived, 1);
+
+        // Moved from compressed/ to archived/
+        assert!(!compressed_path.exists());
+        assert!(root
+            .join("snapshots/archived/2026-03-09T14-30-00Z_session-001.yaml.zst")
+            .exists());
+    }
+
+    #[test]
+    fn test_compact_moves_embedding_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_snapshot_dirs(root);
+
+        let snapshot = sample_snapshot();
+        let embedding = vec![0.1f32, 0.2, 0.3];
+        let yaml_path =
+            write_snapshot_with_embedding(root, &snapshot, &embedding, 3).unwrap();
+        let emb_path = snapshot_embedding_path(&yaml_path);
+
+        // Make both files 8 days old
+        set_file_age(&yaml_path, Duration::from_secs(8 * 24 * 60 * 60));
+        set_file_age(&emb_path, Duration::from_secs(8 * 24 * 60 * 60));
+
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 1);
+
+        // Embedding moved to compressed/
+        assert!(!emb_path.exists());
+        assert!(root
+            .join("snapshots/compressed/2026-03-09T14-30-00Z_session-001.embedding.bin")
+            .exists());
+    }
+
+    #[test]
+    fn test_compact_empty_store() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // No snapshot dirs at all
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 0);
+        assert_eq!(report.compressed_to_archived, 0);
+    }
+
+    #[test]
+    fn test_compact_multiple_snapshots_mixed_ages() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        make_snapshot_dirs(root);
+
+        // Fresh snapshot (keep in active)
+        let s1 = sample_snapshot();
+        let p1 = write_snapshot(root, &s1).unwrap();
+
+        // Old snapshot (should compact)
+        let s2 = Snapshot {
+            session_id: "session-old".to_string(),
+            summary: "Old snapshot".to_string(),
+            key_context: vec![],
+            full_transcript: String::new(),
+            created_at: "2026-02-01T10:00:00Z".to_string(),
+            tier: SnapshotTier::Active,
+            embedding_ref: None,
+        };
+        let p2 = write_snapshot(root, &s2).unwrap();
+        set_file_age(&p2, Duration::from_secs(10 * 24 * 60 * 60));
+
+        let report = compact_snapshots(root).unwrap();
+        assert_eq!(report.active_to_compressed, 1);
+
+        // Fresh one stays
+        assert!(p1.exists());
+        // Old one removed from active
+        assert!(!p2.exists());
+    }
+
+    #[test]
+    fn test_compact_report_values() {
+        let report = CompactReport {
+            active_to_compressed: 3,
+            compressed_to_archived: 1,
+        };
+        assert_eq!(report.active_to_compressed, 3);
+        assert_eq!(report.compressed_to_archived, 1);
     }
 }

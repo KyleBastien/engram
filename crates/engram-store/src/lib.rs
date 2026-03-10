@@ -25,9 +25,9 @@ pub use knowledge::{
 };
 pub use paths::{chunks_path, embeddings_path};
 pub use snapshot::{
-    read_snapshot, scan_snapshot_embeddings, snapshot_embed_text, snapshot_embedding_path,
-    write_snapshot, write_snapshot_embedding, write_snapshot_with_embedding,
-    SnapshotEmbeddingInfo,
+    compact_snapshots, read_snapshot, scan_snapshot_embeddings, snapshot_embed_text,
+    snapshot_embedding_path, write_snapshot, write_snapshot_embedding,
+    write_snapshot_with_embedding, CompactReport, SnapshotEmbeddingInfo,
 };
 
 /// A git-backed semantic store.
