@@ -2,6 +2,7 @@ mod chunk;
 mod config;
 mod embedding;
 mod error;
+mod knowledge;
 mod manifest;
 mod symbol;
 
@@ -13,6 +14,7 @@ pub use config::{
 };
 pub use embedding::{EmbedError, EmbeddingProvider};
 pub use error::{EngramError, Result};
+pub use knowledge::{Decision, GlossaryEntry, Lesson, Pattern};
 pub use manifest::Manifest;
 pub use symbol::{
     ExportedSymbol, ResolvedImport, SymbolId, SymbolReference, SymbolResolver, TypeHierarchy,
