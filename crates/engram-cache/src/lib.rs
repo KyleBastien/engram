@@ -4,10 +4,18 @@ use std::path::Path;
 use engram_core::{ChunkMetadata, EngramError, Result};
 use engram_query::{Bm25Index, HnswIndex};
 
+/// Loaded cache containing the pre-built indexes and metadata.
+pub struct CachedIndex {
+    pub hnsw: HnswIndex,
+    pub bm25: Bm25Index,
+    pub metadata: Vec<ChunkMetadata>,
+}
+
 /// Write compiled index caches to the cache directory for fast subsequent boots.
 ///
-/// Writes four files to `cache_dir`:
+/// Writes five files to `cache_dir`:
 /// - `fingerprint`: the SHA-256 manifest hash for cache validation
+/// - `dimensions`: the HNSW vector dimensionality (needed for load)
 /// - `hnsw.index`: the serialized HNSW vector index
 /// - `bm25.index`: the serialized BM25 keyword index
 /// - `metadata.bin`: the serialized chunk metadata
@@ -23,6 +31,12 @@ pub fn write_cache(
     // Write fingerprint (SHA-256 of manifest.json)
     fs::write(cache_dir.join("fingerprint"), manifest_hash)?;
 
+    // Write HNSW dimensions so try_load_cache can reconstruct the index
+    fs::write(
+        cache_dir.join("dimensions"),
+        hnsw.dimensions().to_string(),
+    )?;
+
     // Write HNSW index
     hnsw.save(&cache_dir.join("hnsw.index"))?;
 
@@ -35,6 +49,64 @@ pub fn write_cache(
     fs::write(cache_dir.join("metadata.bin"), metadata_bytes)?;
 
     Ok(())
+}
+
+/// Try to load a compiled index cache, validating its fingerprint.
+///
+/// Returns `None` (cache miss) if:
+/// - The fingerprint file doesn't exist or doesn't match `current_manifest_hash`
+/// - Any cache file is missing or corrupted
+///
+/// Returns `Some(CachedIndex)` on a valid cache hit.
+pub fn try_load_cache(
+    cache_dir: &Path,
+    current_manifest_hash: &str,
+) -> Result<Option<CachedIndex>> {
+    // Read and validate fingerprint
+    let fingerprint = match fs::read_to_string(cache_dir.join("fingerprint")) {
+        Ok(fp) => fp,
+        Err(_) => return Ok(None),
+    };
+    if fingerprint != current_manifest_hash {
+        return Ok(None);
+    }
+
+    // Read dimensions
+    let dimensions: usize = match fs::read_to_string(cache_dir.join("dimensions")) {
+        Ok(s) => match s.parse() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        },
+        Err(_) => return Ok(None),
+    };
+
+    // Load HNSW index
+    let hnsw = match HnswIndex::load(&cache_dir.join("hnsw.index"), dimensions) {
+        Ok(idx) => idx,
+        Err(_) => return Ok(None),
+    };
+
+    // Load BM25 index
+    let bm25 = match Bm25Index::load(&cache_dir.join("bm25.index")) {
+        Ok(idx) => idx,
+        Err(_) => return Ok(None),
+    };
+
+    // Load metadata
+    let metadata_bytes = match fs::read(cache_dir.join("metadata.bin")) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    let metadata: Vec<ChunkMetadata> = match serde_json::from_slice(&metadata_bytes) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(Some(CachedIndex {
+        hnsw,
+        bm25,
+        metadata,
+    }))
 }
 
 #[cfg(test)]
@@ -149,6 +221,93 @@ mod tests {
         let loaded: Vec<ChunkMetadata> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].chunk_id, "repo#src/lib.rs#foo");
+    }
+
+    #[test]
+    fn try_load_cache_returns_some_on_valid_cache() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let dims = 32;
+        let v0 = make_vector(dims, 0.0);
+        let v1 = make_vector(dims, 1.0);
+        let entries: Vec<(u64, &[f32])> = vec![(0, &v0), (1, &v1)];
+        let hnsw = HnswIndex::build(&entries, dims).unwrap();
+
+        let docs = vec![
+            Bm25Document {
+                key: 0,
+                name: "foo".to_string(),
+                signature: Some("fn foo()".to_string()),
+                tags: vec![],
+            },
+        ];
+        let bm25 = Bm25Index::build(&docs);
+        let chunks = vec![make_chunk("repo#src/lib.rs#foo", "foo")];
+
+        write_cache(&cache_dir, &hnsw, &bm25, &chunks, "myhash").unwrap();
+
+        let result = try_load_cache(&cache_dir, "myhash").unwrap();
+        assert!(result.is_some());
+        let cached = result.unwrap();
+        assert_eq!(cached.hnsw.len(), 2);
+        assert_eq!(cached.bm25.len(), 1);
+        assert_eq!(cached.metadata.len(), 1);
+        assert_eq!(cached.metadata[0].chunk_id, "repo#src/lib.rs#foo");
+    }
+
+    #[test]
+    fn try_load_cache_returns_none_on_fingerprint_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let hnsw = HnswIndex::build(&[], 32).unwrap();
+        let bm25 = Bm25Index::build(&[]);
+        write_cache(&cache_dir, &hnsw, &bm25, &[], "hash_v1").unwrap();
+
+        let result = try_load_cache(&cache_dir, "hash_v2").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_load_cache_returns_none_when_no_cache_dir() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("nonexistent");
+
+        let result = try_load_cache(&cache_dir, "anyhash").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_load_cache_returns_none_on_corrupted_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let hnsw = HnswIndex::build(&[], 32).unwrap();
+        let bm25 = Bm25Index::build(&[]);
+        write_cache(&cache_dir, &hnsw, &bm25, &[], "hash").unwrap();
+
+        // Corrupt metadata.bin
+        fs::write(cache_dir.join("metadata.bin"), b"not valid json").unwrap();
+
+        let result = try_load_cache(&cache_dir, "hash").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_load_cache_returns_none_on_missing_bm25() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".engram-cache");
+
+        let hnsw = HnswIndex::build(&[], 32).unwrap();
+        let bm25 = Bm25Index::build(&[]);
+        write_cache(&cache_dir, &hnsw, &bm25, &[], "hash").unwrap();
+
+        // Remove bm25.index
+        fs::remove_file(cache_dir.join("bm25.index")).unwrap();
+
+        let result = try_load_cache(&cache_dir, "hash").unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
