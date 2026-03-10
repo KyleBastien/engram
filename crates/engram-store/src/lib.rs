@@ -1,6 +1,7 @@
 mod commit;
 mod embeddings;
 mod jsonl;
+mod knowledge;
 mod manifest;
 mod paths;
 
@@ -15,6 +16,7 @@ pub use commit::commit_changes;
 pub use embeddings::{read_embeddings_bin, write_embeddings_bin, EmbeddingFile};
 pub use jsonl::{read_chunks_jsonl, write_chunks_jsonl};
 pub use manifest::{read_manifest, write_manifest};
+pub use knowledge::{write_decision, write_glossary_entry, write_lesson, write_pattern};
 pub use paths::{chunks_path, embeddings_path};
 
 /// A git-backed semantic store.
