@@ -2,3 +2,8 @@
 name = "engram-ingest"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+engram-core = { path = "../engram-core" }
+tree-sitter = "0.24"
+tree-sitter-typescript = "0.23"
