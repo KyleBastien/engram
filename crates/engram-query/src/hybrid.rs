@@ -51,6 +51,29 @@ impl HybridSearch {
         }
     }
 
+    /// Look up a single chunk by its chunk_id.
+    pub fn lookup_by_chunk_id(&self, chunk_id: &str) -> Option<&ChunkEntry> {
+        self.metadata
+            .values()
+            .find(|entry| entry.chunk_id == chunk_id)
+    }
+
+    /// Look up all chunks belonging to a file path.
+    pub fn lookup_by_file(&self, file_path: &str) -> Vec<&ChunkEntry> {
+        self.metadata
+            .values()
+            .filter(|entry| entry.file == file_path)
+            .collect()
+    }
+
+    /// Look up all chunks with a given symbol name.
+    pub fn lookup_by_symbol(&self, symbol_name: &str) -> Vec<&ChunkEntry> {
+        self.metadata
+            .values()
+            .filter(|entry| entry.name == symbol_name)
+            .collect()
+    }
+
     /// Search combining vector similarity and keyword relevance.
     ///
     /// `query` is the text query for BM25 keyword search.

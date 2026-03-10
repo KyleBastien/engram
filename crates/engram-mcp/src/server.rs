@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use engram_core::{ChunkKind, EmbeddingProvider};
-use engram_query::{HybridSearch, SearchResult, DEFAULT_ALPHA};
+use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
 use crate::tools::phase1_tool_definitions;
@@ -17,6 +19,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 pub struct EngineState {
     pub search: HybridSearch,
     pub provider: Box<dyn EmbeddingProvider>,
+    /// Map from repo name to local filesystem path, used to read source content for engram_lookup.
+    pub source_roots: HashMap<String, PathBuf>,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -39,7 +43,26 @@ impl McpServer {
     /// Create a new MCP server with a search engine and embedding provider.
     pub fn with_engine(search: HybridSearch, provider: Box<dyn EmbeddingProvider>) -> Self {
         Self {
-            state: Some(EngineState { search, provider }),
+            state: Some(EngineState {
+                search,
+                provider,
+                source_roots: HashMap::new(),
+            }),
+        }
+    }
+
+    /// Create a new MCP server with search engine, embedding provider, and source roots for content reading.
+    pub fn with_engine_and_sources(
+        search: HybridSearch,
+        provider: Box<dyn EmbeddingProvider>,
+        source_roots: HashMap<String, PathBuf>,
+    ) -> Self {
+        Self {
+            state: Some(EngineState {
+                search,
+                provider,
+                source_roots,
+            }),
         }
     }
 
@@ -150,14 +173,15 @@ async fn handle_tools_call(
 
     match tool_name {
         "engram_search" => handle_engram_search(request, state).await,
-        "engram_lookup" | "engram_status" => {
-            // Tool handlers will be implemented in subsequent stories (US-035, US-036)
+        "engram_lookup" => handle_engram_lookup(request, state).await,
+        "engram_status" => {
+            // Tool handler will be implemented in US-036
             JsonRpcResponse::success(
                 request.id.clone(),
                 json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("Tool '{}' is not yet implemented", tool_name)
+                        "text": "Tool 'engram_status' is not yet implemented"
                     }],
                     "isError": true
                 }),
@@ -295,6 +319,100 @@ async fn handle_engram_search(
     )
 }
 
+async fn handle_engram_lookup(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Search engine not initialized"),
+    };
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    let identifier = match args.and_then(|a| a.get("identifier")).and_then(|i| i.as_str()) {
+        Some(id) if !id.is_empty() => id,
+        _ => return tool_error_response(request, "identifier parameter is required"),
+    };
+
+    let include_content = args
+        .and_then(|a| a.get("include_content"))
+        .and_then(|c| c.as_bool())
+        .unwrap_or(false);
+
+    // Detect identifier type and dispatch to appropriate lookup
+    let entries: Vec<&ChunkEntry> = if identifier.contains('#') {
+        // Chunk ID lookup
+        state
+            .search
+            .lookup_by_chunk_id(identifier)
+            .into_iter()
+            .collect()
+    } else if identifier.contains('/') || identifier.contains('.') {
+        // File path lookup
+        state.search.lookup_by_file(identifier)
+    } else {
+        // Symbol name lookup
+        state.search.lookup_by_symbol(identifier)
+    };
+
+    // Format results
+    let formatted: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            let mut obj = json!({
+                "chunk_id": entry.chunk_id,
+                "kind": serde_json::to_value(&entry.kind).unwrap_or_default(),
+                "name": entry.name,
+                "file": entry.file,
+                "repo": entry.repo,
+                "lines": [entry.start_line, entry.end_line],
+                "stale": entry.stale,
+            });
+            if let Some(sig) = &entry.signature {
+                obj.as_object_mut()
+                    .unwrap()
+                    .insert("signature".to_string(), json!(sig));
+            }
+            if include_content {
+                let content = read_source_content(state, &entry.repo, &entry.file);
+                obj.as_object_mut()
+                    .unwrap()
+                    .insert("content".to_string(), json!(content));
+            }
+            obj
+        })
+        .collect();
+
+    let response_data = json!({
+        "results": formatted,
+        "meta": {
+            "count": formatted.len(),
+        }
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
+/// Read raw source text from a source repo for the given file path.
+fn read_source_content(state: &EngineState, repo: &str, file: &str) -> Option<String> {
+    let root = state.source_roots.get(repo)?;
+    let path = root.join(file);
+    std::fs::read_to_string(path).ok()
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -364,11 +482,10 @@ async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use async_trait::async_trait;
     use engram_core::EmbedError;
-    use engram_query::{Bm25Document, Bm25Index, ChunkEntry, HnswIndex};
+    use engram_query::{Bm25Document, Bm25Index, HnswIndex};
 
     fn make_request(id: i64, method: &str, params: Option<serde_json::Value>) -> String {
         let mut req = json!({
@@ -941,5 +1058,211 @@ mod tests {
         assert!(matches_scope(&ChunkKind::Function, "all"));
         assert!(matches_scope(&ChunkKind::Readme, "all"));
         assert!(matches_scope(&ChunkKind::DocSection, "all"));
+    }
+
+    // --- engram_lookup tool tests ---
+
+    #[tokio::test]
+    async fn test_lookup_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "foo"}})),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_lookup_missing_identifier_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("identifier"));
+    }
+
+    #[tokio::test]
+    async fn test_lookup_by_chunk_id() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "repo#src/math.rs#calculate_total"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["name"], "calculate_total");
+        assert_eq!(results[0]["chunk_id"], "repo#src/math.rs#calculate_total");
+        assert_eq!(data["meta"]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_by_file_path() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "src/math.rs"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["file"], "src/math.rs");
+    }
+
+    #[tokio::test]
+    async fn test_lookup_by_symbol_name() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "calculate_total"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["name"], "calculate_total");
+    }
+
+    #[tokio::test]
+    async fn test_lookup_no_matches_returns_empty_array() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "nonexistent_symbol"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert!(results.is_empty());
+        assert_eq!(data["meta"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_results_have_required_fields() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "repo#src/ui.rs#render_button"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+
+        let r = &results[0];
+        assert!(r["chunk_id"].is_string());
+        assert!(r["kind"].is_string());
+        assert!(r["name"].is_string());
+        assert!(r["file"].is_string());
+        assert!(r["repo"].is_string());
+        assert!(r["lines"].is_array());
+        assert!(!r["stale"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_lookup_includes_signature() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "repo#src/math.rs#calculate_total"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert!(results[0]["signature"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_lookup_by_file_with_dot() {
+        // A file path like "README.md" contains a dot, so it should be detected as a file path
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "README.md"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["file"], "README.md");
+    }
+
+    #[tokio::test]
+    async fn test_lookup_include_content_without_source_roots() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "calculate_total", "include_content": true}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        // Content should be null since no source_roots configured
+        assert!(results[0]["content"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_lookup_include_content_with_source_roots() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let src_dir = tmp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("math.rs"), "fn calculate_total() { 42 }").unwrap();
+
+        let (search, provider) = build_test_engine();
+        let mut source_roots = HashMap::new();
+        source_roots.insert("test-repo".to_string(), tmp_dir.path().to_path_buf());
+        let server = McpServer::with_engine_and_sources(search, provider, source_roots);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "calculate_total", "include_content": true}})),
+        );
+
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]["content"].as_str().unwrap(),
+            "fn calculate_total() { 42 }"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_empty_identifier_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": ""}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
     }
 }
