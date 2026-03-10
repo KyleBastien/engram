@@ -351,6 +351,12 @@ dependencies = [
 [[package]]
 name = "engram-mcp"
 version = "0.1.0"
+dependencies = [
+ "engram-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "engram-provider-ollama"
