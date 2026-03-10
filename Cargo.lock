@@ -223,11 +223,14 @@ dependencies = [
 name = "engram-ingest"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "engram-core",
+ "engram-store",
  "git2",
  "globset",
  "sha2",
  "tempfile",
+ "tokio",
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-rust",
