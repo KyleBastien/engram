@@ -18,6 +18,7 @@ pub struct RawChunk {
 pub enum Language {
     TypeScript,
     Rust,
+    Python,
 }
 
 /// Extracts semantic chunks from source code using tree-sitter AST parsing.
@@ -34,6 +35,7 @@ impl TreeSitterChunker {
         let ts_language: tree_sitter::Language = match language {
             Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Language::Python => tree_sitter_python::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -55,6 +57,7 @@ impl TreeSitterChunker {
             let extracted = match language {
                 Language::TypeScript => self.extract_ts_node(&child, source),
                 Language::Rust => self.extract_rust_node(&child, source),
+                Language::Python => self.extract_python_node(&child, source),
             };
             if let Some(chunk) = extracted {
                 // Flush accumulated module content before this declaration
@@ -175,6 +178,39 @@ impl TreeSitterChunker {
         None
     }
 
+    fn extract_python_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
+        match node.kind() {
+            "function_definition" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Function, name, node, source))
+            }
+            "class_definition" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Class, name, node, source))
+            }
+            "decorated_definition" => {
+                // The inner definition is the last child that is a function or class
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "function_definition" => {
+                            let name = field_text(&child, "name", source)?;
+                            // Use outer node's range so decorators are included
+                            return Some(make_chunk(ChunkKind::Function, name, node, source));
+                        }
+                        "class_definition" => {
+                            let name = field_text(&child, "name", source)?;
+                            return Some(make_chunk(ChunkKind::Class, name, node, source));
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn extract_rust_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
         match node.kind() {
             "function_item" => {
@@ -265,11 +301,22 @@ fn node_text(node: &Node, source: &str) -> String {
 
 fn extract_signature(node: &Node, source: &str) -> Option<String> {
     let text = node_text(node, source);
-    // Find the first '{' for block-bodied constructs
+    // Find the first '{' for block-bodied constructs (C-like languages)
     if let Some(pos) = text.find('{') {
         let sig = text[..pos].trim();
         if !sig.is_empty() {
             return Some(sig.to_string());
+        }
+    }
+    // For Python-style blocks: find the def/class line and include up through it
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("def ") || trimmed.starts_with("class ")
+            || trimmed.starts_with("async def "))
+            && trimmed.ends_with(':')
+        {
+            let sig: String = text.lines().take(i + 1).collect::<Vec<_>>().join("\n");
+            return Some(sig.trim().to_string());
         }
     }
     // Fallback: first line
@@ -650,5 +697,172 @@ fn main() {
     fn empty_rust_source() {
         let chunks = chunk_rs("");
         assert!(chunks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod python_tests {
+    use super::*;
+
+    fn chunk_py(source: &str) -> Vec<RawChunk> {
+        let chunker = TreeSitterChunker::new();
+        chunker.chunk_file(Path::new("test.py"), source, Language::Python)
+    }
+
+    #[test]
+    fn extracts_function_definition() {
+        let source = "def greet(name):\n    return f\"Hello, {name}!\"";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Function);
+        assert_eq!(chunks[0].name, "greet");
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 2);
+        assert!(chunks[0].content.contains("return"));
+    }
+
+    #[test]
+    fn extracts_class_definition() {
+        let source = "class Calculator:\n    def add(self, n):\n        self.value += n\n\n    def sub(self, n):\n        self.value -= n";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "Calculator");
+        assert!(chunks[0].content.contains("def add"));
+        assert!(chunks[0].content.contains("def sub"));
+    }
+
+    #[test]
+    fn extracts_decorated_function() {
+        let source = "@staticmethod\ndef helper():\n    return 42";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Function);
+        assert_eq!(chunks[0].name, "helper");
+        assert!(chunks[0].content.starts_with("@staticmethod"));
+        assert!(chunks[0].content.contains("return 42"));
+    }
+
+    #[test]
+    fn extracts_decorated_class() {
+        let source = "@dataclass\nclass Point:\n    x: float\n    y: float";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "Point");
+        assert!(chunks[0].content.starts_with("@dataclass"));
+    }
+
+    #[test]
+    fn multiple_decorators_included() {
+        let source = "@app.route('/api')\n@login_required\ndef api_handler():\n    return 'ok'";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Function);
+        assert_eq!(chunks[0].name, "api_handler");
+        assert!(chunks[0].content.contains("@app.route"));
+        assert!(chunks[0].content.contains("@login_required"));
+    }
+
+    #[test]
+    fn class_body_includes_all_methods() {
+        let source = "class MyClass:\n    def __init__(self):\n        self.x = 0\n\n    def method_a(self):\n        pass\n\n    def method_b(self):\n        pass";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert!(chunks[0].content.contains("__init__"));
+        assert!(chunks[0].content.contains("method_a"));
+        assert!(chunks[0].content.contains("method_b"));
+    }
+
+    #[test]
+    fn function_signature_extraction() {
+        let source = "def greet(name: str) -> str:\n    return name";
+        let chunks = chunk_py(source);
+        assert_eq!(
+            chunks[0].signature,
+            Some("def greet(name: str) -> str:".to_string())
+        );
+    }
+
+    #[test]
+    fn decorated_function_signature() {
+        let source = "@decorator\ndef foo():\n    pass";
+        let chunks = chunk_py(source);
+        let sig = chunks[0].signature.as_ref().unwrap();
+        assert!(sig.contains("@decorator"));
+        assert!(sig.contains("def foo():"));
+    }
+
+    #[test]
+    fn module_level_code_captured() {
+        let source = "import os\nimport sys\n\ndef main():\n    pass";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].kind, ChunkKind::Module);
+        assert!(chunks[0].content.contains("import os"));
+        assert!(chunks[0].content.contains("import sys"));
+        assert_eq!(chunks[1].kind, ChunkKind::Function);
+        assert_eq!(chunks[1].name, "main");
+    }
+
+    #[test]
+    fn mixed_declarations_and_module_code() {
+        let source = "import os\n\ndef hello():\n    return 'world'\n\nVERSION = '1.0'\n\nclass App:\n    def run(self):\n        pass";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].kind, ChunkKind::Module);
+        assert!(chunks[0].content.contains("import os"));
+        assert_eq!(chunks[1].kind, ChunkKind::Function);
+        assert_eq!(chunks[1].name, "hello");
+        assert_eq!(chunks[2].kind, ChunkKind::Module);
+        assert!(chunks[2].content.contains("VERSION"));
+        assert_eq!(chunks[3].kind, ChunkKind::Class);
+        assert_eq!(chunks[3].name, "App");
+    }
+
+    #[test]
+    fn empty_python_source() {
+        let chunks = chunk_py("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunks_do_not_overlap() {
+        let source = "import os\n\ndef a():\n    pass\n\nx = 1\n\ndef b():\n    pass";
+        let chunks = chunk_py(source);
+        for i in 0..chunks.len() {
+            for j in (i + 1)..chunks.len() {
+                assert!(
+                    chunks[i].end_line <= chunks[j].start_line
+                        || chunks[j].end_line <= chunks[i].start_line,
+                    "Chunks {} and {} overlap: [{}-{}] vs [{}-{}]",
+                    chunks[i].name,
+                    chunks[j].name,
+                    chunks[i].start_line,
+                    chunks[i].end_line,
+                    chunks[j].start_line,
+                    chunks[j].end_line,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn function_includes_full_body() {
+        let source = "def add(a, b):\n    result = a + b\n    return result";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].content.contains("result = a + b"));
+        assert!(chunks[0].content.contains("return result"));
+    }
+
+    #[test]
+    fn async_function_definition() {
+        let source = "async def fetch_data(url):\n    return await get(url)";
+        let chunks = chunk_py(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Function);
+        assert_eq!(chunks[0].name, "fetch_data");
     }
 }
