@@ -18,6 +18,9 @@ pub struct Snapshot {
     pub full_transcript: String,
     pub created_at: String,
     pub tier: SnapshotTier,
+    /// Relative path to the `.embedding.bin` file, if embedded.
+    #[serde(default)]
+    pub embedding_ref: Option<String>,
 }
 
 #[cfg(test)]
@@ -50,6 +53,7 @@ mod tests {
             full_transcript: "User: Add snapshot types\nAssistant: Done.".to_string(),
             created_at: "2026-03-09T00:00:00Z".to_string(),
             tier: SnapshotTier::Active,
+            embedding_ref: None,
         };
 
         let yaml = serde_yaml::to_string(&snapshot).expect("serialize to YAML");
@@ -74,6 +78,7 @@ mod tests {
                 full_transcript: String::new(),
                 created_at: "2026-03-09T00:00:00Z".to_string(),
                 tier: tier.clone(),
+                embedding_ref: None,
             };
 
             let yaml = serde_yaml::to_string(&snapshot).expect("serialize");
@@ -91,6 +96,7 @@ mod tests {
             full_transcript: "transcript".to_string(),
             created_at: "2026-03-09T00:00:00Z".to_string(),
             tier: SnapshotTier::Active,
+            embedding_ref: None,
         };
 
         // Debug

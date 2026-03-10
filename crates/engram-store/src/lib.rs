@@ -4,6 +4,7 @@ mod jsonl;
 mod knowledge;
 mod manifest;
 mod paths;
+mod snapshot;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,18 @@ pub use commit::commit_changes;
 pub use embeddings::{read_embeddings_bin, write_embeddings_bin, EmbeddingFile};
 pub use jsonl::{read_chunks_jsonl, write_chunks_jsonl};
 pub use manifest::{read_manifest, write_manifest};
-pub use knowledge::{write_decision, write_glossary_entry, write_lesson, write_pattern};
+pub use knowledge::{
+    decision_embed_text, knowledge_embedding_path, lesson_embed_text, pattern_embed_text,
+    scan_knowledge_embeddings, write_decision, write_decision_with_embedding,
+    write_glossary_entry, write_knowledge_embedding, write_lesson, write_lesson_with_embedding,
+    write_pattern, write_pattern_with_embedding, KnowledgeEmbeddingInfo,
+};
 pub use paths::{chunks_path, embeddings_path};
+pub use snapshot::{
+    read_snapshot, scan_snapshot_embeddings, snapshot_embed_text, snapshot_embedding_path,
+    write_snapshot, write_snapshot_embedding, write_snapshot_with_embedding,
+    SnapshotEmbeddingInfo,
+};
 
 /// A git-backed semantic store.
 pub struct Store {
