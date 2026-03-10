@@ -1,6 +1,7 @@
 mod commit;
 mod embeddings;
 mod jsonl;
+mod paths;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use uuid::Uuid;
 pub use commit::commit_changes;
 pub use embeddings::{read_embeddings_bin, write_embeddings_bin, EmbeddingFile};
 pub use jsonl::{read_chunks_jsonl, write_chunks_jsonl};
+pub use paths::{chunks_path, embeddings_path};
 
 /// A git-backed semantic store.
 pub struct Store {
