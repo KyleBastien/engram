@@ -352,7 +352,9 @@ dependencies = [
 name = "engram-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "engram-core",
+ "engram-query",
  "serde",
  "serde_json",
  "tokio",
