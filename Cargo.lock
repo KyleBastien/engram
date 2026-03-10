@@ -371,6 +371,7 @@ version = "0.1.0"
 dependencies = [
  "engram-core",
  "engram-store",
+ "git2",
  "serde",
  "serde_json",
  "sha2",
