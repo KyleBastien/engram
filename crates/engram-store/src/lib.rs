@@ -1,3 +1,4 @@
+mod embeddings;
 mod jsonl;
 
 use std::fs;
@@ -7,6 +8,7 @@ use engram_core::{EngramError, Result, StoreConfig};
 use git2::{Repository, Signature};
 use uuid::Uuid;
 
+pub use embeddings::{read_embeddings_bin, write_embeddings_bin, EmbeddingFile};
 pub use jsonl::{read_chunks_jsonl, write_chunks_jsonl};
 
 /// A git-backed semantic store.
