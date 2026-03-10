@@ -4,6 +4,7 @@ mod embedding;
 mod error;
 mod knowledge;
 mod manifest;
+mod onboarding;
 mod snapshot;
 mod symbol;
 
@@ -17,6 +18,10 @@ pub use embedding::{EmbedError, EmbeddingProvider};
 pub use error::{EngramError, Result};
 pub use knowledge::{Decision, GlossaryEntry, Lesson, Pattern};
 pub use manifest::Manifest;
+pub use onboarding::{
+    Abstraction, ArchitectureMap, BuildTestCommands, CommandInfo, DirectoryInfo, KeyAbstractions,
+    PatternInfo, ProjectOverview,
+};
 pub use snapshot::{Snapshot, SnapshotTier};
 pub use symbol::{
     ExportedSymbol, ResolvedImport, SymbolId, SymbolReference, SymbolResolver, TypeHierarchy,
