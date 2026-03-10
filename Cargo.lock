@@ -370,8 +370,10 @@ name = "engram-query"
 version = "0.1.0"
 dependencies = [
  "engram-core",
+ "engram-store",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "usearch",
