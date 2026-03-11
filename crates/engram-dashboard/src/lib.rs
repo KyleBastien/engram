@@ -133,6 +133,24 @@ pub struct KnowledgeSnapshot {
     pub onboarding_status: Vec<OnboardingStatus>,
 }
 
+/// A single data point for a time-series chart.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TimeSeriesPoint {
+    pub timestamp: String,
+    pub value: f64,
+}
+
+/// Snapshot of search analytics data served via REST API.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearchAnalyticsSnapshot {
+    pub query_frequency: Vec<TimeSeriesPoint>,
+    pub avg_relevance: Vec<TimeSeriesPoint>,
+    pub cache_hit_rate: f64,
+    pub sidecar_hit_rate: f64,
+    pub total_queries: usize,
+    pub avg_search_time_ms: f64,
+}
+
 /// Snapshot of index health data served via REST API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthSnapshot {
@@ -145,12 +163,13 @@ pub struct HealthSnapshot {
     pub store_path: String,
 }
 
-/// Shared state for the dashboard: event broadcaster + health data + knowledge data.
+/// Shared state for the dashboard: event broadcaster + health data + knowledge data + search analytics.
 #[derive(Clone)]
 pub struct DashboardState {
     pub broadcaster: EventBroadcaster,
     pub health: Arc<RwLock<HealthSnapshot>>,
     pub knowledge: Arc<RwLock<KnowledgeSnapshot>>,
+    pub search_analytics: Arc<RwLock<SearchAnalyticsSnapshot>>,
 }
 
 impl DashboardState {
@@ -159,6 +178,7 @@ impl DashboardState {
             broadcaster,
             health: Arc::new(RwLock::new(health)),
             knowledge: Arc::new(RwLock::new(KnowledgeSnapshot::default())),
+            search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
         }
     }
 
@@ -171,6 +191,7 @@ impl DashboardState {
             broadcaster,
             health: Arc::new(RwLock::new(health)),
             knowledge: Arc::new(RwLock::new(knowledge)),
+            search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
         }
     }
 }
@@ -233,6 +254,7 @@ pub fn build_router_with_state(state: DashboardState) -> Router {
         .route("/ws", get(ws_handler))
         .route("/api/health", get(health_handler))
         .route("/api/knowledge", get(knowledge_handler))
+        .route("/api/search_analytics", get(search_analytics_handler))
         .nest("/dashboard", dashboard_routes)
         .with_state(shared)
 }
@@ -256,6 +278,13 @@ async fn knowledge_handler(
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
     let snapshot = state.knowledge.read().await;
+    Json(snapshot.clone())
+}
+
+async fn search_analytics_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.search_analytics.read().await;
     Json(snapshot.clone())
 }
 
@@ -717,6 +746,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_embedded_assets_contain_search() {
+        assert!(Assets::get("search.html").is_some());
+    }
+
+    #[tokio::test]
     async fn test_knowledge_html_served() {
         let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
         let (base, handle) = start_state_test_server(state).await;
@@ -730,6 +764,79 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body = resp.text().await.unwrap();
         assert!(body.contains("Knowledge Activity"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_search_analytics_snapshot_default_empty() {
+        let snapshot = SearchAnalyticsSnapshot::default();
+        assert_eq!(snapshot.total_queries, 0);
+        assert!(snapshot.query_frequency.is_empty());
+        assert!(snapshot.avg_relevance.is_empty());
+        assert_eq!(snapshot.cache_hit_rate, 0.0);
+        assert_eq!(snapshot.sidecar_hit_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_search_analytics_api_returns_json() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        {
+            let mut analytics = state.search_analytics.write().await;
+            analytics.total_queries = 42;
+            analytics.avg_search_time_ms = 15.5;
+            analytics.cache_hit_rate = 0.75;
+            analytics.sidecar_hit_rate = 0.3;
+            analytics.query_frequency = vec![
+                TimeSeriesPoint {
+                    timestamp: "2026-03-10T00:00:00Z".to_string(),
+                    value: 10.0,
+                },
+                TimeSeriesPoint {
+                    timestamp: "2026-03-10T01:00:00Z".to_string(),
+                    value: 15.0,
+                },
+            ];
+            analytics.avg_relevance = vec![TimeSeriesPoint {
+                timestamp: "2026-03-10T00:00:00Z".to_string(),
+                value: 0.85,
+            }];
+        }
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/search_analytics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["total_queries"], 42);
+        assert_eq!(body["avg_search_time_ms"], 15.5);
+        assert_eq!(body["cache_hit_rate"], 0.75);
+        assert_eq!(body["sidecar_hit_rate"], 0.3);
+        assert_eq!(body["query_frequency"].as_array().unwrap().len(), 2);
+        assert_eq!(body["avg_relevance"][0]["value"], 0.85);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_search_html_served() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/dashboard/search.html"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("Search Analytics"));
 
         handle.abort();
     }

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engram Dashboard &mdash; Search Analytics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+        }
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.5rem; }
+        header .subtitle { color: #94a3b8; font-size: 0.9rem; }
+        nav {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        nav a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            border: 1px solid #334155;
+        }
+        nav a:hover { color: #e2e8f0; border-color: #64748b; }
+        nav a.active { color: #3b82f6; border-color: #3b82f6; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            flex: 1;
+            min-height: 0;
+        }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .card h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }
+        .card-body {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .chart-card { grid-column: 1 / -1; }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.4rem 0;
+            font-size: 0.85rem;
+        }
+        .stat-label { color: #64748b; }
+        .stat-value { color: #e2e8f0; font-weight: 500; }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-green { background: #22c55e; color: #0f172a; }
+        .badge-yellow { background: #eab308; color: #0f172a; }
+        .badge-blue { background: #3b82f6; color: #fff; }
+        .badge-gray { background: #475569; color: #e2e8f0; }
+        .loading { color: #64748b; text-align: center; padding: 2rem; }
+        .error { color: #ef4444; text-align: center; padding: 2rem; }
+        .empty-state {
+            color: #64748b;
+            font-size: 0.85rem;
+            padding: 1rem 0;
+            text-align: center;
+        }
+        canvas {
+            width: 100% !important;
+            height: 200px !important;
+        }
+        .rate-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0;
+        }
+        .rate-label {
+            min-width: 140px;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        .rate-track {
+            flex: 1;
+            height: 24px;
+            background: #334155;
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        .rate-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .rate-value {
+            font-size: 0.85rem;
+            font-weight: 600;
+            min-width: 50px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>Engram Dashboard</h1>
+            <span class="subtitle">Semantic Context Engine &mdash; Search Analytics</span>
+        </div>
+    </header>
+
+    <nav>
+        <a href="/dashboard/">Live Session</a>
+        <a href="/dashboard/health.html">Index Health</a>
+        <a href="/dashboard/knowledge.html">Knowledge</a>
+        <a href="/dashboard/search.html" class="active">Search Analytics</a>
+    </nav>
+
+    <div id="loading" class="loading">Loading search analytics...</div>
+    <div id="error" class="error" style="display:none"></div>
+
+    <div class="grid" id="main-grid" style="display:none">
+        <div class="card">
+            <h2>Summary</h2>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span class="stat-label">Total Queries</span>
+                    <span class="stat-value" id="total-queries">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Search Time</span>
+                    <span class="stat-value" id="avg-search-time">0 ms</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Live Queries (session)</span>
+                    <span class="stat-value" id="live-queries">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Results / Query</span>
+                    <span class="stat-value" id="avg-results">0</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Cache &amp; Sidecar Hit Rates</h2>
+            <div class="card-body">
+                <div class="rate-bar">
+                    <span class="rate-label">Cache Hit Rate</span>
+                    <div class="rate-track">
+                        <div class="rate-fill" id="cache-fill" style="width:0%;background:#22c55e"></div>
+                    </div>
+                    <span class="rate-value" id="cache-rate">0%</span>
+                </div>
+                <div class="rate-bar">
+                    <span class="rate-label">Sidecar Hit Rate</span>
+                    <div class="rate-track">
+                        <div class="rate-fill" id="sidecar-fill" style="width:0%;background:#3b82f6"></div>
+                    </div>
+                    <span class="rate-value" id="sidecar-rate">0%</span>
+                </div>
+                <div class="empty-state" id="rates-empty" style="display:none">No search data yet</div>
+            </div>
+        </div>
+
+        <div class="card chart-card">
+            <h2>Query Frequency Over Time</h2>
+            <div class="card-body">
+                <canvas id="freq-chart"></canvas>
+                <div class="empty-state" id="freq-empty" style="display:none">No query data yet</div>
+            </div>
+        </div>
+
+        <div class="card chart-card">
+            <h2>Average Relevance Score Over Time</h2>
+            <div class="card-body">
+                <canvas id="relevance-chart"></canvas>
+                <div class="empty-state" id="relevance-empty" style="display:none">No relevance data yet</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var loadingEl = document.getElementById('loading');
+        var errorEl = document.getElementById('error');
+        var mainGrid = document.getElementById('main-grid');
+
+        // Live WebSocket aggregation
+        var liveQueries = [];
+        var MAX_LIVE_POINTS = 60;
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '';
+            try {
+                var d = new Date(ts);
+                if (isNaN(d.getTime())) return ts;
+                return d.toLocaleTimeString();
+            } catch (e) {
+                return ts;
+            }
+        }
+
+        // Minimal canvas line chart renderer
+        function drawLineChart(canvasId, labels, values, color, yLabel) {
+            var canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+            var ctx = canvas.getContext('2d');
+            var dpr = window.devicePixelRatio || 1;
+            var rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+
+            var w = rect.width;
+            var h = rect.height;
+            var padLeft = 50;
+            var padRight = 10;
+            var padTop = 10;
+            var padBottom = 30;
+            var chartW = w - padLeft - padRight;
+            var chartH = h - padTop - padBottom;
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (values.length === 0) return;
+
+            var maxVal = 0;
+            for (var i = 0; i < values.length; i++) {
+                if (values[i] > maxVal) maxVal = values[i];
+            }
+            if (maxVal === 0) maxVal = 1;
+
+            // Grid lines
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1;
+            for (var g = 0; g <= 4; g++) {
+                var gy = padTop + chartH - (g / 4) * chartH;
+                ctx.beginPath();
+                ctx.moveTo(padLeft, gy);
+                ctx.lineTo(padLeft + chartW, gy);
+                ctx.stroke();
+
+                ctx.fillStyle = '#64748b';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(((maxVal * g) / 4).toFixed(1), padLeft - 5, gy + 3);
+            }
+
+            // X-axis labels
+            ctx.fillStyle = '#64748b';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            var labelStep = Math.max(1, Math.floor(labels.length / 6));
+            for (var li = 0; li < labels.length; li += labelStep) {
+                var lx = padLeft + (li / Math.max(1, values.length - 1)) * chartW;
+                ctx.fillText(labels[li], lx, h - 5);
+            }
+
+            // Line
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (var j = 0; j < values.length; j++) {
+                var x = padLeft + (j / Math.max(1, values.length - 1)) * chartW;
+                var y = padTop + chartH - (values[j] / maxVal) * chartH;
+                if (j === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Points
+            ctx.fillStyle = color;
+            for (var k = 0; k < values.length; k++) {
+                var px = padLeft + (k / Math.max(1, values.length - 1)) * chartW;
+                var py = padTop + chartH - (values[k] / maxVal) * chartH;
+                ctx.beginPath();
+                ctx.arc(px, py, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+
+        function renderAnalytics(data) {
+            // Summary stats
+            document.getElementById('total-queries').textContent = (data.total_queries || 0).toLocaleString();
+            document.getElementById('avg-search-time').textContent = (data.avg_search_time_ms || 0).toFixed(1) + ' ms';
+            document.getElementById('live-queries').textContent = liveQueries.length.toLocaleString();
+
+            var totalResults = 0;
+            for (var i = 0; i < liveQueries.length; i++) {
+                totalResults += (liveQueries[i].code || 0) + (liveQueries[i].knowledge || 0);
+            }
+            var avgRes = liveQueries.length > 0 ? (totalResults / liveQueries.length).toFixed(1) : '0';
+            document.getElementById('avg-results').textContent = avgRes;
+
+            // Cache + sidecar rates
+            var cacheRate = data.cache_hit_rate || 0;
+            var sidecarRate = data.sidecar_hit_rate || 0;
+            var cachePct = (cacheRate * 100).toFixed(1);
+            var sidecarPct = (sidecarRate * 100).toFixed(1);
+
+            document.getElementById('cache-fill').style.width = cachePct + '%';
+            document.getElementById('cache-rate').textContent = cachePct + '%';
+            document.getElementById('sidecar-fill').style.width = sidecarPct + '%';
+            document.getElementById('sidecar-rate').textContent = sidecarPct + '%';
+
+            var ratesEmpty = document.getElementById('rates-empty');
+            if (data.total_queries === 0 && liveQueries.length === 0) {
+                ratesEmpty.style.display = 'block';
+            } else {
+                ratesEmpty.style.display = 'none';
+            }
+
+            // Combine REST time-series with live WebSocket data for charts
+            var freqLabels = [];
+            var freqValues = [];
+            var relLabels = [];
+            var relValues = [];
+
+            // REST data first
+            var qf = data.query_frequency || [];
+            for (var fi = 0; fi < qf.length; fi++) {
+                freqLabels.push(formatTimestamp(qf[fi].timestamp));
+                freqValues.push(qf[fi].value);
+            }
+
+            var ar = data.avg_relevance || [];
+            for (var ri = 0; ri < ar.length; ri++) {
+                relLabels.push(formatTimestamp(ar[ri].timestamp));
+                relValues.push(ar[ri].value);
+            }
+
+            // Append live WebSocket data as additional points
+            for (var lq = 0; lq < liveQueries.length; lq++) {
+                freqLabels.push(formatTimestamp(liveQueries[lq].time));
+                freqValues.push(1);
+            }
+
+            // Draw charts
+            var freqEmpty = document.getElementById('freq-empty');
+            var freqCanvas = document.getElementById('freq-chart');
+            if (freqValues.length === 0) {
+                freqEmpty.style.display = 'block';
+                freqCanvas.style.display = 'none';
+            } else {
+                freqEmpty.style.display = 'none';
+                freqCanvas.style.display = 'block';
+                drawLineChart('freq-chart', freqLabels, freqValues, '#3b82f6');
+            }
+
+            var relEmpty = document.getElementById('relevance-empty');
+            var relCanvas = document.getElementById('relevance-chart');
+            if (relValues.length === 0) {
+                relEmpty.style.display = 'block';
+                relCanvas.style.display = 'none';
+            } else {
+                relEmpty.style.display = 'none';
+                relCanvas.style.display = 'block';
+                drawLineChart('relevance-chart', relLabels, relValues, '#22c55e');
+            }
+        }
+
+        var lastData = null;
+
+        function fetchAnalytics() {
+            fetch('/api/search_analytics')
+                .then(function(resp) {
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    return resp.json();
+                })
+                .then(function(data) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = 'none';
+                    mainGrid.style.display = 'grid';
+                    lastData = data;
+                    renderAnalytics(data);
+                })
+                .catch(function(err) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = 'block';
+                    errorEl.textContent = 'Failed to load search analytics: ' + err.message;
+                });
+        }
+
+        // WebSocket for live search event aggregation
+        function connectWebSocket() {
+            var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsUrl = protocol + '//' + location.host + '/ws';
+            var ws = new WebSocket(wsUrl);
+            var reconnectDelay = 1000;
+
+            ws.onopen = function() {
+                reconnectDelay = 1000;
+            };
+
+            ws.onmessage = function(evt) {
+                try {
+                    var event = JSON.parse(evt.data);
+                    if (event.type === 'search_query') {
+                        liveQueries.push({
+                            time: new Date().toISOString(),
+                            query: event.query,
+                            code: event.code_result_count || 0,
+                            knowledge: event.knowledge_result_count || 0,
+                            time_ms: event.search_time_ms || 0
+                        });
+                        if (liveQueries.length > MAX_LIVE_POINTS) {
+                            liveQueries.shift();
+                        }
+                        if (lastData) {
+                            renderAnalytics(lastData);
+                        }
+                    }
+                } catch (e) {
+                    // ignore parse errors
+                }
+            };
+
+            ws.onclose = function() {
+                setTimeout(function() {
+                    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+                    connectWebSocket();
+                }, reconnectDelay);
+            };
+
+            ws.onerror = function() {
+                ws.close();
+            };
+        }
+
+        // Initial fetch
+        fetchAnalytics();
+
+        // Refresh every 30 seconds
+        setInterval(fetchAnalytics, 30000);
+
+        // Connect WebSocket for live event aggregation
+        connectWebSocket();
+    })();
+    </script>
+</body>
+</html>
