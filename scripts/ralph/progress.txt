@@ -1611,3 +1611,17 @@ Started: 03/09/2026 17:15:47
   - Dashboard HTML views use consistent pattern: nav with `class="active"` on current page, loading/error/main-grid toggle, fetch+setInterval for REST data
   - Kind badges (decision=blue, lesson=green, pattern=purple, glossary=yellow) follow color conventions from existing dashboard styling
 ---
+
+## 2026-03-10 - US-092
+- Implemented Search Analytics View for the dashboard frontend
+- Added SearchAnalyticsSnapshot struct with TimeSeriesPoint for time-series data, REST endpoint at /api/search_analytics
+- Created search.html with: query frequency line chart (canvas-based), average relevance score line chart, cache hit rate and sidecar hit rate progress bars, summary stats card, WebSocket live event aggregation
+- Updated nav links in all 3 existing HTML views (index.html, health.html, knowledge.html) to include Search Analytics link
+- Added 4 new tests: embedded asset exists, default snapshot empty, API returns JSON, HTML served correctly (24 total tests pass)
+- Files changed: crates/engram-dashboard/src/lib.rs, crates/engram-dashboard/src/assets/search.html (new), crates/engram-dashboard/src/assets/index.html, crates/engram-dashboard/src/assets/health.html, crates/engram-dashboard/src/assets/knowledge.html
+- **Learnings for future iterations:**
+  - Canvas-based line charts work well for dashboard — no external chart library needed, just drawLineChart() helper with padding/grid/labels
+  - Search analytics uses dual data sources: REST polling every 30s for historical data + WebSocket for real-time live query aggregation
+  - index.html uses inline styles on nav links (not CSS classes) unlike health.html/knowledge.html which use nav a / nav a.active classes
+  - DashboardState now has 3 data fields (health, knowledge, search_analytics) — all follow the Arc<RwLock<Snapshot>> pattern
+---
