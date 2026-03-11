@@ -333,6 +333,76 @@ pub fn config_tool_definitions() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Returns tool definitions for benchmark MCP tools.
+pub fn benchmark_tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "name": "engram_benchmark_start",
+            "description": "Start a new benchmark session. In assisted mode, engram_search auto-logs events. In baseline mode, engram_search is disabled. Returns a session_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["baseline", "assisted"],
+                        "description": "Benchmark mode: baseline (search disabled) or assisted (search auto-logs)"
+                    },
+                    "task_description": {
+                        "type": "string",
+                        "description": "Description of the task being benchmarked"
+                    }
+                },
+                "required": ["mode", "task_description"]
+            }
+        }),
+        json!({
+            "name": "engram_benchmark_log",
+            "description": "Log an event to the active benchmark session. Used to manually record search/read events with token and file metrics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The query or action that was performed"
+                    },
+                    "tokens_used": {
+                        "type": "integer",
+                        "description": "Number of tokens consumed by this event"
+                    },
+                    "files_read": {
+                        "type": "integer",
+                        "description": "Number of files read during this event"
+                    },
+                    "hit": {
+                        "type": "boolean",
+                        "description": "Whether the retrieval was a hit (optional)"
+                    }
+                },
+                "required": ["query", "tokens_used", "files_read"]
+            }
+        }),
+        json!({
+            "name": "engram_benchmark_end",
+            "description": "End the active benchmark session. Computes metrics, writes the report, and commits it to the store. Returns the benchmark report.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_outcome": {
+                        "type": "string",
+                        "enum": ["success", "failure", "partial"],
+                        "description": "Outcome of the benchmarked task"
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional notes about the benchmark session"
+                    }
+                },
+                "required": ["task_outcome"]
+            }
+        }),
+    ]
+}
+
 /// Returns tool definitions for graph exploration MCP tools.
 pub fn graph_tool_definitions() -> Vec<serde_json::Value> {
     vec![json!({
@@ -706,5 +776,63 @@ mod tests {
         assert!(values.contains(&"pull"));
         assert!(values.contains(&"push"));
         assert!(values.contains(&"both"));
+    }
+
+    #[test]
+    fn test_benchmark_tool_definitions_count() {
+        let tools = benchmark_tool_definitions();
+        assert_eq!(tools.len(), 3);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_benchmark_start"));
+        assert!(names.contains(&"engram_benchmark_log"));
+        assert!(names.contains(&"engram_benchmark_end"));
+    }
+
+    #[test]
+    fn test_benchmark_start_has_required_params() {
+        let tools = benchmark_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_benchmark_start").unwrap();
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"mode"));
+        assert!(required_names.contains(&"task_description"));
+        assert_eq!(required_names.len(), 2);
+    }
+
+    #[test]
+    fn test_benchmark_log_has_required_params() {
+        let tools = benchmark_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_benchmark_log").unwrap();
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"query"));
+        assert!(required_names.contains(&"tokens_used"));
+        assert!(required_names.contains(&"files_read"));
+        assert_eq!(required_names.len(), 3);
+    }
+
+    #[test]
+    fn test_benchmark_log_has_optional_hit() {
+        let tools = benchmark_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_benchmark_log").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("hit"));
+    }
+
+    #[test]
+    fn test_benchmark_end_has_required_params() {
+        let tools = benchmark_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_benchmark_end").unwrap();
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "task_outcome");
+    }
+
+    #[test]
+    fn test_benchmark_end_has_optional_notes() {
+        let tools = benchmark_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_benchmark_end").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("notes"));
     }
 }

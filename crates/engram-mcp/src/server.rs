@@ -7,12 +7,13 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, OnboardingDepth, Partition, Pattern, Snapshot, SnapshotTier, SourceConfig};
+use engram_bench::BenchmarkHarness;
+use engram_core::{BenchmarkEvent, BenchmarkMode, ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, OnboardingDepth, Partition, Pattern, Snapshot, SnapshotTier, SourceConfig, TaskOutcome};
 use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
 use crate::custom::{CustomContextDef, CustomDefinitions};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{assessment_tool_definitions, config_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
+use crate::tools::{assessment_tool_definitions, benchmark_tool_definitions, config_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
 
 /// Built-in modes that affect search behavior (knowledge sidecar parameters).
 /// Custom modes can be loaded from YAML files in `.engram/modes/`.
@@ -281,6 +282,9 @@ impl Context {
             "engram_sync",
             "engram_switch_mode",
             "engram_get_config",
+            "engram_benchmark_start",
+            "engram_benchmark_log",
+            "engram_benchmark_end",
         ])
     }
 
@@ -379,6 +383,13 @@ impl SessionTracker {
 }
 
 /// Holds the search engine and embedding provider needed for tool execution.
+/// Tracks the currently active benchmark session for search integration.
+#[derive(Debug, Clone)]
+struct ActiveBenchmark {
+    session_id: String,
+    mode: BenchmarkMode,
+}
+
 pub struct EngineState {
     pub search: HybridSearch,
     pub provider: Box<dyn EmbeddingProvider>,
@@ -398,6 +409,10 @@ pub struct EngineState {
     modes: ModeTracker,
     /// Custom context and mode definitions loaded from YAML files.
     pub custom_definitions: CustomDefinitions,
+    /// Benchmark harness for managing benchmark sessions.
+    benchmark: BenchmarkHarness,
+    /// Currently active benchmark session (if any).
+    active_benchmark: Mutex<Option<ActiveBenchmark>>,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -435,6 +450,8 @@ impl McpServer {
                 graph: SymbolGraph::default(),
                 modes: ModeTracker::new(),
                 custom_definitions: CustomDefinitions::default(),
+                benchmark: BenchmarkHarness::default(),
+                active_benchmark: Mutex::new(None),
             }),
             context: Context::Default,
         }
@@ -458,6 +475,8 @@ impl McpServer {
                 graph: SymbolGraph::default(),
                 modes: ModeTracker::new(),
                 custom_definitions: CustomDefinitions::default(),
+                benchmark: BenchmarkHarness::default(),
+                active_benchmark: Mutex::new(None),
             }),
             context: Context::Default,
         }
@@ -486,6 +505,7 @@ impl McpServer {
     pub fn set_boot_info(&mut self, boot_time_ms: u64, store_path: String, cache_status: String) {
         if let Some(ref mut state) = self.state {
             state.boot_time_ms = boot_time_ms;
+            state.benchmark = BenchmarkHarness::new(PathBuf::from(&store_path));
             state.store_path = store_path;
             state.cache_status = cache_status;
         }
@@ -619,6 +639,7 @@ fn handle_tools_list(request: &JsonRpcRequest, context: &Context) -> JsonRpcResp
     tools.extend(related_tool_definitions());
     tools.extend(sync_tool_definitions());
     tools.extend(config_tool_definitions());
+    tools.extend(benchmark_tool_definitions());
 
     let allowed = context.allowed_tools();
     tools.retain(|t| {
@@ -663,6 +684,9 @@ async fn handle_tools_call(
         "engram_sync" => handle_engram_sync(request, state).await,
         "engram_switch_mode" => handle_engram_switch_mode(request, state).await,
         "engram_get_config" => handle_engram_get_config(request, state, context).await,
+        "engram_benchmark_start" => handle_engram_benchmark_start(request, state).await,
+        "engram_benchmark_log" => handle_engram_benchmark_log(request, state).await,
+        "engram_benchmark_end" => handle_engram_benchmark_end(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -690,6 +714,17 @@ async fn handle_engram_search(
         Some(s) => s,
         None => return tool_error_response(request, "Search engine not initialized"),
     };
+
+    // Check if search is disabled by a baseline benchmark
+    let active_bench = {
+        let active = state.active_benchmark.lock().expect("active_benchmark lock poisoned");
+        active.clone()
+    };
+    if let Some(ref ab) = active_bench {
+        if ab.mode == BenchmarkMode::Baseline {
+            return tool_error_response(request, "Search is disabled in baseline benchmark mode");
+        }
+    }
 
     let args = request
         .params
@@ -845,6 +880,22 @@ async fn handle_engram_search(
         indexed_at: r.indexed_at.clone(),
     }));
     state.session.record_chunks(retrieved);
+
+    // Auto-log benchmark event in assisted mode
+    if let Some(ref ab) = active_bench {
+        if ab.mode == BenchmarkMode::Assisted {
+            let event = BenchmarkEvent {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                event_type: "search".to_string(),
+                query: query.to_string(),
+                tokens_used: 0,
+                files_read: 0,
+                chunks_returned: (code_doc_results.len() + knowledge_results.len()) as u64,
+                hit: None,
+            };
+            state.benchmark.log_event(&ab.session_id, event);
+        }
+    }
 
     // Format code/doc results
     let formatted_code: Vec<serde_json::Value> = code_doc_results
@@ -2403,6 +2454,181 @@ async fn handle_engram_get_config(
     )
 }
 
+async fn handle_engram_benchmark_start(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Search engine not initialized"),
+    };
+
+    let args = request.params.as_ref().and_then(|p| p.get("arguments"));
+
+    let mode_str = match args.and_then(|a| a.get("mode")).and_then(|m| m.as_str()) {
+        Some(m) => m,
+        None => return tool_error_response(request, "mode parameter is required"),
+    };
+
+    let mode = match mode_str {
+        "baseline" => BenchmarkMode::Baseline,
+        "assisted" => BenchmarkMode::Assisted,
+        _ => return tool_error_response(request, &format!("Invalid mode: {mode_str}. Must be baseline or assisted")),
+    };
+
+    let task_description = match args.and_then(|a| a.get("task_description")).and_then(|t| t.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => return tool_error_response(request, "task_description parameter is required"),
+    };
+
+    // Check if there's already an active benchmark
+    {
+        let active = state.active_benchmark.lock().expect("active_benchmark lock poisoned");
+        if active.is_some() {
+            return tool_error_response(request, "A benchmark session is already active. End it before starting a new one.");
+        }
+    }
+
+    let session_id = state.benchmark.start(mode.clone(), task_description);
+
+    // Track the active benchmark
+    {
+        let mut active = state.active_benchmark.lock().expect("active_benchmark lock poisoned");
+        *active = Some(ActiveBenchmark {
+            session_id: session_id.clone(),
+            mode,
+        });
+    }
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": json!({"session_id": session_id}).to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
+async fn handle_engram_benchmark_log(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Search engine not initialized"),
+    };
+
+    let args = request.params.as_ref().and_then(|p| p.get("arguments"));
+
+    let query = match args.and_then(|a| a.get("query")).and_then(|q| q.as_str()) {
+        Some(q) => q.to_string(),
+        None => return tool_error_response(request, "query parameter is required"),
+    };
+
+    let tokens_used = match args.and_then(|a| a.get("tokens_used")).and_then(|t| t.as_u64()) {
+        Some(t) => t,
+        None => return tool_error_response(request, "tokens_used parameter is required"),
+    };
+
+    let files_read = match args.and_then(|a| a.get("files_read")).and_then(|f| f.as_u64()) {
+        Some(f) => f,
+        None => return tool_error_response(request, "files_read parameter is required"),
+    };
+
+    let hit = args.and_then(|a| a.get("hit")).and_then(|h| h.as_bool());
+
+    let session_id = {
+        let active = state.active_benchmark.lock().expect("active_benchmark lock poisoned");
+        match active.as_ref() {
+            Some(ab) => ab.session_id.clone(),
+            None => return tool_error_response(request, "No active benchmark session"),
+        }
+    };
+
+    let event = BenchmarkEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        event_type: "manual".to_string(),
+        query,
+        tokens_used,
+        files_read,
+        chunks_returned: 0,
+        hit,
+    };
+
+    state.benchmark.log_event(&session_id, event);
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "Event logged to benchmark session"
+            }],
+            "isError": false
+        }),
+    )
+}
+
+async fn handle_engram_benchmark_end(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Search engine not initialized"),
+    };
+
+    let args = request.params.as_ref().and_then(|p| p.get("arguments"));
+
+    let outcome_str = match args.and_then(|a| a.get("task_outcome")).and_then(|o| o.as_str()) {
+        Some(o) => o,
+        None => return tool_error_response(request, "task_outcome parameter is required"),
+    };
+
+    let outcome = match outcome_str {
+        "success" => TaskOutcome::Success,
+        "failure" => TaskOutcome::Failure,
+        "partial" => TaskOutcome::Partial,
+        _ => return tool_error_response(request, &format!("Invalid task_outcome: {outcome_str}. Must be success, failure, or partial")),
+    };
+
+    let notes = args
+        .and_then(|a| a.get("notes"))
+        .and_then(|n| n.as_str())
+        .map(String::from);
+
+    let session_id = {
+        let mut active = state.active_benchmark.lock().expect("active_benchmark lock poisoned");
+        match active.take() {
+            Some(ab) => ab.session_id,
+            None => return tool_error_response(request, "No active benchmark session"),
+        }
+    };
+
+    let report = state.benchmark.end(&session_id, outcome, notes);
+
+    // Commit the report to the store
+    if !state.store_path.is_empty() {
+        if let Ok(repo) = git2::Repository::open(&state.store_path) {
+            let _ = engram_store::commit_changes(&repo, &format!("benchmark: session {session_id}"));
+        }
+    }
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -2769,7 +2995,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -5436,7 +5662,7 @@ mod tests {
     #[test]
     fn test_default_context_allows_all_tools() {
         let allowed = Context::Default.allowed_tools();
-        assert_eq!(allowed.len(), 16);
+        assert_eq!(allowed.len(), 19);
         assert!(allowed.contains("engram_search"));
         assert!(allowed.contains("engram_record_decision"));
         assert!(allowed.contains("engram_onboard"));
@@ -5448,7 +5674,7 @@ mod tests {
     #[test]
     fn test_claude_code_context_allows_all_tools() {
         let allowed = Context::ClaudeCode.allowed_tools();
-        assert_eq!(allowed.len(), 16);
+        assert_eq!(allowed.len(), 19);
     }
 
     #[test]
@@ -5497,7 +5723,7 @@ mod tests {
         let responses = run_server_with_context(&input, Context::Default).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
     }
 
     #[tokio::test]
@@ -5538,7 +5764,7 @@ mod tests {
         let responses = run_server_with_context(&input, Context::ClaudeCode).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
     }
 
     #[test]
@@ -5856,8 +6082,8 @@ search:
         ).unwrap();
         let ctx = Context::Custom(def);
         let allowed = ctx.allowed_tools();
-        // Should have all tools minus 7 excluded = 9
-        assert_eq!(allowed.len(), 9);
+        // Should have all tools minus 7 excluded = 12
+        assert_eq!(allowed.len(), 12);
         assert!(allowed.contains("engram_search"));
         assert!(allowed.contains("engram_lookup"));
         assert!(allowed.contains("engram_status"));
@@ -5870,7 +6096,7 @@ search:
         let def: crate::custom::CustomContextDef = serde_yaml::from_str("name: full\n").unwrap();
         let ctx = Context::Custom(def);
         let allowed = ctx.allowed_tools();
-        assert_eq!(allowed.len(), 16);
+        assert_eq!(allowed.len(), 19);
     }
 
     #[test]
@@ -6067,8 +6293,8 @@ search:
             .collect();
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        // 16 total minus 3 excluded = 13
-        assert_eq!(tools.len(), 13);
+        // 19 total minus 3 excluded = 16
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(!names.contains(&"engram_onboard"));

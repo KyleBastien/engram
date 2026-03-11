@@ -468,6 +468,7 @@ version = "0.1.0"
 dependencies = [
  "engram-core",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "uuid",
 ]
@@ -541,6 +542,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "engram-bench",
  "engram-core",
  "engram-ingest",
  "engram-query",

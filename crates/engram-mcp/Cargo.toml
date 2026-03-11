@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+engram-bench = { path = "../engram-bench" }
 engram-core = { path = "../engram-core" }
 engram-ingest = { path = "../engram-ingest" }
 engram-query = { path = "../engram-query" }
