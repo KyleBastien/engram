@@ -1,0 +1,1048 @@
+# Ralph Progress Log
+Started: 03/09/2026 17:15:47
+
+## Codebase Patterns
+- serde (v1, with "derive" feature) and serde_json (v1) are dependencies of engram-core for serialization
+- serde_json v1 is also a direct dependency of engram-ingest (for package.json parsing in commands.rs)
+- Use `#[serde(rename_all = "snake_case")]` on enums for consistent JSON field naming
+- Rust workspace uses `resolver = "2"` in root Cargo.toml
+- Library crates have `src/lib.rs`, only engram-cli has `src/main.rs`
+- Each crate has a `project.json` for Nx orchestration wrapping Cargo commands
+- Use `cargo clippy --workspace -- -D warnings` for typecheck/lint verification
+- async-trait v0.1 is used for async trait definitions; tokio (dev-dependency) with "macros" + "rt" features for async tests
+- All crate versions start at 0.1.0, edition 2021
+- prd.json is at `tasks/prd.json` (not in the ralph script directory)
+- Use `&Path` (not `&PathBuf`) in trait method parameters — clippy `ptr_arg` lint enforces this
+- engram-core follows one-module-per-concept pattern: error.rs, chunk.rs, embedding.rs, symbol.rs, config.rs
+- serde_yaml v0.9 is used for YAML config deserialization; uuid v1 (with "v4" + "serde" features) for store IDs
+- Use `#[serde(default)]` on struct fields so partial YAML configs deserialize with sensible defaults
+- engram-core modules are private (`mod`) with `pub use` re-exports — external crates import via `engram_core::Type`, not `engram_core::module::Type`
+- Provider crates live under `crates/engram-providers/<name>/` with package name `engram-provider-<name>`
+- reqwest v0.12 with "json" feature for HTTP clients; wiremock v0.6 for HTTP mock testing
+- tokio dev-dependency needs "rt-multi-thread" feature for wiremock tests (not just "rt")
+- git2 v0.19 for git operations; scope borrows on Repository before moving it into structs
+- tempfile v3 for test isolation with temporary directories
+- tree-sitter 0.24 + tree-sitter-typescript 0.23 for AST parsing; `LANGUAGE_TYPESCRIPT.into()` for Language conversion
+- tree-sitter uses 0-based rows; convert to 1-based lines with `row + 1`; end_line needs column==0 check
+- engram-ingest uses one-module-per-concept: chunker.rs for TreeSitterChunker, future modules for other concerns
+- tree-sitter-rust 0.23 is compatible with tree-sitter 0.24 (NOT 0.24 which uses ABI v15); exports `LANGUAGE` not `LANGUAGE_RUST`
+- tree-sitter-python 0.23 is compatible with tree-sitter 0.24; exports `LANGUAGE` (same as tree-sitter-rust)
+- Python signature extraction: look for `def`/`class`/`async def` lines ending with `:` since Python uses `:` not `{` for blocks
+- Clippy enforces `strip_prefix` over manual `starts_with` + index slicing, and `manual_map` over if-let-else chains returning Option
+- engram-ingest has 7 submodules: chunker.rs (tree-sitter), detect.rs (language detection), diff.rs (git change detection), hash.rs (content hashing), markdown.rs, pipeline.rs (orchestrator), sliding.rs
+- engram-ingest depends on engram-store for writing to the git store; use `EmbedError -> EngramError::Embed(String)` for error conversion
+- globset v0.4 for glob pattern matching; git2 borrow checker requires scoping borrows before moving Repository
+- McpServer holds Option<EngineState> with HybridSearch + Box<dyn EmbeddingProvider>; use with_engine() constructor for search-capable server
+- MCP tool handlers are async; handle_request dispatches to async handle_tools_call
+- Clippy requires `impl Default` alongside `fn new()` — always add both
+- EngineState.source_roots: HashMap<String, PathBuf> maps repo name to local path for reading source files
+- HybridSearch has lookup_by_chunk_id, lookup_by_file, lookup_by_symbol for direct O(n) lookups on metadata values
+- clap v4 with "derive" feature for CLI; use `Parser` on top-level struct, `Subcommand` on command enum
+- Check `.engram` directory existence to detect if store already exists at a path
+- engram-cli uses `#[tokio::main]` with "macros" + "rt-multi-thread" features for async commands
+- OllamaProvider in engram-cli/src/provider.rs provides minimal embedding support; future provider crates will be more complete
+- IndexManager.into_hybrid_search() consumes the manager and builds HybridSearch with proper u64 key mapping
+- McpServer.set_boot_info() populates boot_time_ms, store_path, cache_status on the EngineState
+- Knowledge items in HNSW use keys starting at KNOWLEDGE_KEY_OFFSET (2_000_000) for partition 2 separation
+- HnswIndex.add() allows inserting vectors after initial build (used for knowledge items on cache-hit boot)
+- Clippy now requires `is_some_and()` instead of `map_or(false, ...)` — `unnecessary_map_or` lint
+- zstd v0.13 for compression; use `zstd::Decoder::new()` for streaming decompression, `zstd::encode_all()` for one-shot compression
+- Snapshot filenames use sanitized timestamps (colons → hyphens); snapshots stored in `snapshots/{active,compressed,archived}/`
+- When adding optional fields to shared types, use `#[serde(default)]` for backwards-compatible deserialization
+- Use `std::fs::FileTimes` + `File::set_times()` (not `std::time`) to set mtime in tests for age-based logic
+- engram-mcp knowledge tool handler pattern: validate state → extract params → build struct → embed → write_with_embedding → commit → respond (glossary is simpler: no embedding step)
+- Knowledge tool definitions are in `knowledge_tool_definitions()` merged with phase1 tools in `handle_tools_list`
+- serde_yaml v0.9 is a regular dependency of engram-mcp (needed for glossary handler to parse terms.yaml)
+- Partition enum in engram-core maps ChunkKind to index partitions (Code=0, Docs=1, Knowledge=2, Snapshots=3)
+- Key offsets: DOCS_KEY_OFFSET=1M, KNOWLEDGE_KEY_OFFSET=2M, SNAPSHOT_KEY_OFFSET=3M — partition filtering uses key range checks
+- HybridSearch.search() accepts `partitions: Option<&[Partition]>` — None searches all, Some filters by key range before scoring
+- ChunkEntry and SearchResult include `tags: Vec<String>` and `indexed_at: String` for knowledge metadata propagation
+- engram_search returns separate `code_results` and `knowledge_results` sections (NOT a single `results` array)
+- Test engines must place docs at DOCS_KEY_OFFSET and knowledge at KNOWLEDGE_KEY_OFFSET for partition filtering to work correctly in tests
+- serde_yaml v0.9 is also a dependency of engram-ingest (for onboarding YAML file writing)
+- `Store.path` is public but `Store.repo` is private — use `Repository::open(store_path)` to get a repo handle
+- `commit_changes` returns `Ok(None)` when there are no changes — handle gracefully in idempotent pipelines
+- engram-mcp depends on engram-ingest for onboarding; tool count in `test_tools_list_returns_phase1_tools` must be updated when adding tools (currently 10)
+- EngineState has a `session: SessionTracker` field (Mutex<Vec<SearchEvent>>) for in-memory session tracking; use interior mutability since handlers get `&EngineState`
+- New tool category functions (e.g., `assessment_tool_definitions()`) must be imported in server.rs and merged in `handle_tools_list` via `tools.extend()`
+
+---
+
+## 2026-03-09 - US-001
+- Initialized Cargo workspace with 7 crate members: engram-core, engram-ingest, engram-query, engram-mcp, engram-store, engram-cache, engram-cli
+- Created root Cargo.toml, nx.json, .gitignore
+- Created Cargo.toml, project.json, and src/lib.rs (or main.rs for CLI) for each crate
+- `cargo build --workspace` and `cargo clippy --workspace` both pass
+- Files changed: Cargo.toml, nx.json, .gitignore, crates/*/Cargo.toml, crates/*/project.json, crates/*/src/lib.rs|main.rs
+- **Learnings for future iterations:**
+  - The project root is `/Users/kyle.bastien/pushpress/engram/`
+  - .gitignore already had ralph working file entries; new entries should be prepended
+  - Nx is not installed as a dependency - project.json files are structural only for now
+---
+
+## 2026-03-09 - US-002
+- Implemented EngramError enum with 9 variants (Io, Git, Config, Index, Embed, Serialize, Store, Mcp, ChunkParse)
+- Io variant uses #[from] for automatic conversion from std::io::Error
+- Other variants wrap String for flexibility (concrete error types will be added as crates are implemented)
+- Exported Result<T> type alias
+- Added thiserror v2 as the sole error dependency
+- Files changed: crates/engram-core/Cargo.toml, crates/engram-core/src/lib.rs, crates/engram-core/src/error.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - thiserror v2 is the latest major version; uses derive macro `#[derive(Error)]`
+  - String variants are used for errors whose source crate isn't yet a dependency (Git, Config, etc.) — these can be upgraded to `#[from]` wrapping when the source crate is added
+  - engram-core re-exports from `mod error` via `pub use error::{EngramError, Result}`
+---
+
+## 2026-03-09 - US-003
+- Defined ChunkKind enum with 10 variants (Function, Class, Method, Type, Impl, Module, DocSection, Readme, CommentBlock, Other)
+- Defined ChunkMetadata struct with all required fields (chunk_id, kind, name, signature, start_line, end_line, content_hash, tags, indexed_at, source_commit, embedding_offset)
+- Both types derive Serialize, Deserialize, Debug, Clone, PartialEq
+- Added serde and serde_json dependencies to engram-core
+- Unit tests verify round-trip for all ChunkKind variants, JSONL format, and optional signature field
+- Files changed: crates/engram-core/Cargo.toml, crates/engram-core/src/lib.rs, crates/engram-core/src/chunk.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - signature field is Option<String> since not all chunk kinds have signatures (e.g., Module, Readme)
+  - ChunkKind uses `#[serde(rename_all = "snake_case")]` for clean JSON representation
+  - engram-core follows pattern of one module per concept: error.rs, chunk.rs, etc.
+---
+
+## 2026-03-09 - US-004
+- Defined EmbedError enum with 4 variants (Api, RateLimited, TextTooLong, Unavailable), each wrapping String
+- Defined EmbeddingProvider async trait with methods: name, dimensions, max_batch_size, embed
+- Trait is marked Send + Sync via `#[async_trait]`
+- Added async-trait v0.1 dependency; tokio as dev-dependency for async tests
+- Tests: error display formatting, Send+Sync bounds, mock provider, trait object safety
+- Files changed: crates/engram-core/Cargo.toml, crates/engram-core/src/lib.rs, crates/engram-core/src/embedding.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - EmbedError is intentionally separate from EngramError — it's a domain-specific error for embedding ops
+  - EmbedError implements Display + Error manually (not via thiserror) since it has simple String variants
+  - The embed() method takes `&[&str]` for batch input and returns `Vec<Vec<f32>>`
+  - MockProvider pattern in tests is useful for verifying trait implementation works
+---
+
+## 2026-03-09 - US-005
+- Defined SymbolResolver async trait with methods: extract_exports, resolve_imports, find_references, type_hierarchy
+- Defined supporting types: SymbolId, ExportedSymbol, ResolvedImport, SymbolReference, TypeHierarchy
+- All types derive Serialize, Deserialize, Debug, Clone, PartialEq; SymbolId also derives Eq, Hash
+- Trait is Send + Sync via #[async_trait], object-safe
+- Tests: serde round-trips for all types, Send+Sync bounds, mock resolver, object safety, SymbolId hash
+- Files changed: crates/engram-core/src/symbol.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Use `&Path` not `&PathBuf` in trait method signatures — clippy enforces `ptr_arg` lint
+  - For `?Sized` trait bound tests (testing `dyn Trait: Send + Sync`), use `fn assert<T: Send + Sync + ?Sized>()`
+  - SymbolId uses Eq + Hash so it can be used in HashSet/HashMap for deduplication
+  - engram-core follows one-module-per-concept pattern: error.rs, chunk.rs, embedding.rs, symbol.rs
+---
+
+## 2026-03-09 - US-006
+- Defined StoreConfig struct with all 14 top-level sections (version, sources, store, embedding, symbol_resolution, chunking, search, context, modes, hooks, watcher, dashboard, benchmark, storage)
+- Created 15 nested config types as separate structs (SourceConfig, EmbeddingConfig, OllamaConfig, SearchConfig, DashboardConfig, etc.)
+- Defined StoreSchema struct with semver version string and UUID store_id
+- Implemented Default for StoreConfig and all nested types with sensible defaults
+- YAML deserialization works with partial configs (missing sections get defaults via `#[serde(default)]`)
+- 6 unit tests: schema roundtrip, default values, full YAML deser, minimal YAML deser, serialization roundtrip, UUID in schema
+- Files changed: crates/engram-core/Cargo.toml, crates/engram-core/src/lib.rs, crates/engram-core/src/config.rs (new), Cargo.lock
+- **Learnings for future iterations:**
+  - serde_yaml v0.9 is marked deprecated upstream but is the standard for YAML in Rust; consider serde_yml if issues arise
+  - uuid crate needs both "v4" and "serde" features for generation + serialization
+  - `#[serde(default)]` on struct fields is key for allowing partial YAML configs — each nested struct needs its own Default impl
+  - StoreConfig has 14 sections; when adding new sections, add both the field and its Default impl
+---
+
+## 2026-03-09 - US-007
+- Defined Manifest struct with 7 fields: chunk_count (usize), last_indexed_commit (Option<String>), model_name (String), dimensions (usize), source_repos (Vec<String>), created_at (String), updated_at (String)
+- Manifest derives Serialize, Deserialize, Debug, Clone
+- 4 unit tests: JSON round-trip, field name verification, optional last_indexed_commit, empty source_repos
+- Files changed: crates/engram-core/src/manifest.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Manifest follows the same pattern as other engram-core modules: one struct per file, re-exported from lib.rs
+  - Timestamps use String type (ISO 8601 format) consistent with ChunkMetadata.indexed_at
+  - last_indexed_commit is Option<String> since there may be no commits indexed yet
+---
+
+## 2026-03-09 - US-008
+- Implemented OllamaProvider struct implementing EmbeddingProvider trait from engram-core
+- Created new crate at crates/engram-providers/ollama/ (package name: engram-provider-ollama)
+- OllamaConfig with defaults: base_url localhost:11434, model nomic-embed-text, dimensions 768, max_batch_size 512
+- name() returns "ollama/{model}" format, dimensions()/max_batch_size() return configured values
+- embed() sends POST to /api/embed endpoint using reqwest, sends all texts in a single request
+- Unreachable server returns EmbedError::Unavailable, non-2xx status returns EmbedError::Api
+- 9 unit tests using wiremock: single embed, batch embed, unavailable server, API error, name/dimensions, defaults, batch single-request verification, request body format
+- Files changed: Cargo.toml (workspace member), crates/engram-providers/ollama/Cargo.toml, crates/engram-providers/ollama/project.json, crates/engram-providers/ollama/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-core modules are private; import via `engram_core::EmbedError`, not `engram_core::embedding::EmbedError`
+  - wiremock v0.6 requires tokio with "rt-multi-thread" feature (not just "rt")
+  - OllamaProvider stores a precomputed `display_name` String so `name()` can return `&str`
+  - Provider crates go in `crates/engram-providers/<name>/` with package name `engram-provider-<name>`
+---
+
+## 2026-03-09 - US-009
+- Implemented Store::init_local(path, config) -> Result<Store> in engram-store
+- Creates full directory structure: .engram/ (version, store-id), index/, knowledge/ (5 subdirs), snapshots/ (3 subdirs), metrics/ (2 subdirs)
+- Writes engram.config.yaml via serde_yaml serialization
+- Writes .gitignore ignoring .engram-cache/
+- Initializes git repo via git2, stages all files, commits with "engram: initialize store"
+- 6 unit tests: directory structure, config write, gitignore, git repo with commit, all files committed, custom config
+- Files changed: crates/engram-store/Cargo.toml, crates/engram-store/src/lib.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - git2 v0.19 is used for git operations; `Repository::init()` creates a new repo
+  - Borrow checker requires scoping `tree` and `index` borrows on `repo` before moving `repo` into the return struct
+  - Use `#[allow(dead_code)]` on `repo` field since it's stored for future use but not yet read
+  - `index.add_all(["*"].iter(), ...)` stages all files including those in subdirectories
+  - tempfile v3 is used for test isolation — each test gets its own temporary directory
+  - git2 requires a `Signature` for commits; use `Signature::now("engram", "engram@localhost")`
+---
+
+## 2026-03-09 - US-010
+- Implemented `write_chunks_jsonl(path, chunks)` and `read_chunks_jsonl(path)` in engram-store
+- Created `crates/engram-store/src/jsonl.rs` as a new module, re-exported from lib.rs
+- Added `serde_json = "1"` dependency to engram-store
+- Empty files return empty vec, whitespace-only lines are skipped, trailing newlines handled
+- 5 unit tests: round-trip multiple chunks, empty file, trailing whitespace, one-object-per-line format, single chunk
+- Files changed: crates/engram-store/Cargo.toml, crates/engram-store/src/lib.rs, crates/engram-store/src/jsonl.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - engram-store now follows a multi-module pattern like engram-core: lib.rs + jsonl.rs (will grow with embeddings.rs, etc.)
+  - serde_json is now a dependency of engram-store (was already in engram-core)
+  - JSONL write appends a trailing newline after the last line for POSIX compliance
+  - `line.trim()` before parsing handles both trailing whitespace and leading whitespace in JSONL
+---
+
+## 2026-03-09 - US-011
+- Implemented `write_embeddings_bin(path, vectors, dimensions)` and `read_embeddings_bin(path)` in engram-store
+- Created `crates/engram-store/src/embeddings.rs` as a new module, re-exported from lib.rs
+- Binary format: 16-byte little-endian header (magic b'EGRM', version u16=1, dimensions u16, count u32, precision u16=0, reserved u16=0) + contiguous f32 vectors
+- EmbeddingFile struct returned by read with dimensions, count, precision, and flattened vectors
+- Validates magic bytes and version on read; returns EngramError::Store on mismatch
+- 6 unit tests: round-trip 0/1/100 vectors, invalid magic error, unsupported version error, header size verification
+- Files changed: crates/engram-store/src/embeddings.rs (new), crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - Binary format uses little-endian throughout for cross-platform consistency
+  - No new dependencies needed — only std::io and std::fs for binary read/write
+  - EmbeddingFile.vectors is a flat Vec<f32> (count * dimensions elements), not Vec<Vec<f32>>
+  - EngramError::Store(String) is used for store-specific format errors (magic mismatch, version, truncation)
+---
+
+## 2026-03-09 - US-012
+- Implemented `commit_changes(repo, message) -> Result<Option<Oid>>` in engram-store
+- Created `crates/engram-store/src/commit.rs` as a new module, re-exported from lib.rs
+- Stages all changes (new, modified, deleted) using `index.add_all` + `index.remove_path` for deletions
+- Uses `StatusOptions` with `include_untracked(true)` to detect if there are any changes
+- Returns `Ok(None)` when there are no changes (no empty commits)
+- Author set to 'engram' / 'engram@local' as required
+- Handles both initial commits (no parent) and subsequent commits (with parent from HEAD)
+- 6 unit tests: new file, modified file, deleted file, no changes, OID return, multi-file staging
+- Files changed: crates/engram-store/src/commit.rs (new), crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - `git2::Status::WT_DELETED` indicates working-tree deletions that need `index.remove_path()` — `add_all` alone doesn't handle deletes
+  - `repo.head().ok()` pattern safely handles both initial repos (no HEAD) and repos with commits
+  - commit_changes returns `Option<Oid>` not just `Oid` to distinguish "committed" from "nothing to commit"
+  - Note: US-009 init_local uses email 'engram@localhost' but US-012 spec requires 'engram@local' — they differ intentionally
+---
+
+## 2026-03-09 - US-013
+- Implemented `chunks_path(store_root, source_name, relative_file_path)` and `embeddings_path(store_root, source_name, relative_file_path)` in engram-store
+- Created `crates/engram-store/src/paths.rs` as a new module, re-exported from lib.rs
+- Paths resolve to `{store_root}/index/{source_name}/{relative_file_path}.chunks.jsonl` (and `.embeddings.bin`)
+- Path traversal prevention: sanitize function strips `..`, `.`, prefix, and root components using `std::path::Component` filtering
+- Parent directories created automatically via `fs::create_dir_all`
+- 8 unit tests: simple chunks/embeddings paths, nested paths, parent dir creation, path traversal in file path and source name, top-level file, nested embeddings
+- Files changed: crates/engram-store/src/paths.rs (new), crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - `std::path::Component::Normal` filtering is the idiomatic Rust way to strip path traversal — avoids manual string replacement
+  - `OsString::push()` appends to an OS string without adding a separator — useful for adding extensions like `.chunks.jsonl`
+  - engram-store now has 4 submodules: commit.rs, embeddings.rs, jsonl.rs, paths.rs
+---
+
+## 2026-03-09 - US-014
+- Implemented `write_manifest(store_root, manifest)` and `read_manifest(store_root)` in engram-store
+- Created `crates/engram-store/src/manifest.rs` as a new module, re-exported from lib.rs
+- write_manifest writes pretty-printed JSON to `{store_root}/index/manifest.json`
+- read_manifest returns `Option<Manifest>` — `None` if file doesn't exist
+- Creates parent `index/` directory automatically if missing
+- 4 unit tests: round-trip, read returns None when missing, JSON is pretty-printed, creates index directory if missing
+- Files changed: crates/engram-store/src/manifest.rs (new), crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-store now has 5 submodules: commit.rs, embeddings.rs, jsonl.rs, manifest.rs, paths.rs
+  - `serde_json::to_string_pretty` produces readable JSON for git diffs
+  - EngramError::Serialize is used for JSON serialization/deserialization errors in the store layer
+---
+
+## 2026-03-09 - US-015
+- Implemented TreeSitterChunker struct in engram-ingest with chunk_file(path, source, language) method
+- Created RawChunk struct with kind, name, signature, start_line, end_line, content fields
+- Created Language enum (currently TypeScript only, extensible for future stories)
+- TypeScript extraction handles: function_declaration, arrow_function (in lexical_declaration), class_declaration, method_definition, type_alias_declaration, interface_declaration, enum_declaration, export_statement (unwraps to inner declaration)
+- File-level code not inside declarations captured as ChunkKind::Module chunks
+- Signature extraction uses text up to first '{' for block-bodied constructs
+- 14 unit tests: all node types, exports, arrow functions, module code, no-overlap, full body, signature, empty source, mixed declarations
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/lib.rs, crates/engram-ingest/src/chunker.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - tree-sitter 0.24 is compatible with tree-sitter-typescript 0.23 via tree-sitter-language 0.1 bridge
+  - `LANGUAGE_TYPESCRIPT.into()` converts LanguageFn to tree_sitter::Language
+  - tree-sitter uses 0-based row/column; convert to 1-based lines with `row + 1`
+  - For end_line: if end_position.column == 0, use end_row (content ended on previous line)
+  - export_statement wraps inner declarations — extract name/kind from inner node but use outer node's range for content
+  - Lexical declarations containing arrow_function assignments are extracted as Function chunks
+  - Classes are extracted as single chunks (including all methods) to avoid overlapping with method_definition
+  - Non-declaration top-level nodes are accumulated and flushed as Module chunks when a declaration is encountered
+---
+
+## 2026-03-09 - US-016
+- Added Rust language support to TreeSitterChunker via tree-sitter-rust 0.23
+- Added `Language::Rust` variant to the Language enum
+- Implemented `extract_rust_node` method handling all 10 required node types: function_item, struct_item, enum_item, impl_item, trait_item, type_item, mod_item, const_item, static_item, macro_definition
+- Added `rust_impl_name` helper to extract impl names (handles both `impl Type` and `impl Trait for Type`)
+- Refactored `chunk_file` to dispatch to language-specific extraction via match on Language
+- 15 Rust-specific unit tests covering all node types, impl trait, signatures, module-level code, mixed declarations, and empty source
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/chunker.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - tree-sitter-rust 0.24 uses ABI v15, incompatible with tree-sitter 0.24 (which expects ABI v14); use tree-sitter-rust 0.23 instead
+  - tree-sitter-rust exports `LANGUAGE` (not `LANGUAGE_RUST`), unlike tree-sitter-typescript which exports `LANGUAGE_TYPESCRIPT`
+  - Rust impl_item has `type` and optional `trait` fields via `child_by_field_name`
+  - ChunkKind mapping: function_item→Function, struct/enum/trait/type→Type, impl→Impl, mod→Module, const/static→Other, macro_definition→Function
+  - Module-level code collection (use statements, etc.) works the same way for Rust as for TypeScript
+---
+
+## 2026-03-09 - US-017
+- Added Python language support to TreeSitterChunker via tree-sitter-python 0.23
+- Added `Language::Python` variant to the Language enum
+- Implemented `extract_python_node` method handling: function_definition, class_definition, decorated_definition
+- `decorated_definition` extracts name/kind from inner node but uses outer node's range so decorators are included in content
+- Updated `extract_signature` to handle Python-style `:` blocks (finds `def`/`class`/`async def` line ending with `:`)
+- 14 Python-specific unit tests covering all node types, decorators (single and multiple), class bodies, signatures, module-level code, async functions, no-overlap, empty source
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/chunker.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - tree-sitter-python 0.23 exports `LANGUAGE` (same pattern as tree-sitter-rust), compatible with tree-sitter 0.24
+  - Python `decorated_definition` wraps inner `function_definition` or `class_definition` — extract name from inner, range from outer
+  - Python signature extraction needed special handling: `{` doesn't exist in Python, so scan for `def`/`class`/`async def` lines ending with `:`
+  - Module-level code collection (imports, assignments) works the same way for Python as for TypeScript and Rust
+---
+
+## 2026-03-09 - US-018
+- Implemented SlidingWindowChunker struct in engram-ingest with chunk_file(source, max_tokens, overlap_tokens) method
+- Created `crates/engram-ingest/src/sliding.rs` as a new module, re-exported from lib.rs
+- Token count approximated by whitespace splitting; empty lines count as 1 token to ensure progress
+- Files smaller than max_tokens produce a single chunk (chunk_0)
+- Larger files split into overlapping windows based on line boundaries
+- Overlap works by stepping back overlap_tokens worth of lines from the end of each chunk
+- Always advances at least one line to prevent infinite loops
+- All chunks have kind: ChunkKind::Other, sequential names (chunk_0, chunk_1, ...), and no signature
+- 10 unit tests: empty source, whitespace-only, single chunk, multiple chunks, correct kind, overlap, sequential names, signature is None, one-based line ranges, single line file
+- Files changed: crates/engram-ingest/src/sliding.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-ingest now has 2 submodules: chunker.rs (tree-sitter) and sliding.rs (fallback)
+  - SlidingWindowChunker operates on lines, not individual tokens, for clean chunk boundaries
+  - Empty lines must count as at least 1 token to prevent accumulating too many empty lines in a single chunk
+  - Overlap step-back from end_line_idx prevents re-processing already-covered content
+---
+
+## 2026-03-09 - US-019
+- Implemented MarkdownChunker struct in engram-ingest with chunk_file(source) method
+- Created `crates/engram-ingest/src/markdown.rs` as a new module, re-exported from lib.rs
+- Splits Markdown at #, ##, ### heading boundaries; deeper headings (####) are not split points
+- Each chunk has kind ChunkKind::DocSection, name is the heading text
+- Preamble (content before first heading) captured as a chunk with name "preamble"
+- If no headings exist, entire content is a single "preamble" chunk
+- 12 unit tests: empty, whitespace, preamble, split boundaries, kind, content inclusion, heading text, line ranges, no headings, signature none, deep headings, trimmed heading text
+- Files changed: crates/engram-ingest/src/markdown.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-ingest now has 3 submodules: chunker.rs (tree-sitter), sliding.rs (fallback), markdown.rs (Markdown)
+  - clippy requires `strip_prefix` instead of manual `starts_with` + index slicing
+  - clippy also catches `manual_map` — use `.or_else()` chains with `.map()` instead of if-else-if-else returning Option
+  - No new dependencies needed — MarkdownChunker only uses std string operations
+---
+
+## 2026-03-09 - US-020
+- Implemented `detect_language(path) -> ChunkerKind` in engram-ingest
+- Created `crates/engram-ingest/src/detect.rs` as a new module, re-exported from lib.rs
+- ChunkerKind enum with 4 variants: TreeSitter(Language), Markdown, SlidingWindow, Skip
+- TreeSitter: .ts/.tsx → TypeScript, .rs → Rust, .py → Python
+- Markdown: .md, .mdx
+- Skip: comprehensive binary extension list (images, archives, fonts, compiled, media, etc.)
+- SlidingWindow: all other extensions and files with no extension
+- Case-insensitive matching via `.to_lowercase()` on extension
+- 15 unit tests: each language, markdown variants, sliding window fallbacks, skip for binaries, no extension, case insensitivity
+- Files changed: crates/engram-ingest/src/detect.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-ingest now has 4 submodules: chunker.rs, detect.rs, markdown.rs, sliding.rs
+  - No new dependencies needed — only std::path::Path for extension extraction
+  - ChunkerKind::TreeSitter wraps Language enum to reuse existing chunker infrastructure
+---
+
+## 2026-03-09 - US-021
+- Implemented `content_hash(content) -> String` returning hex-encoded SHA-256 hash
+- Implemented `has_chunk_changed(old_hash, new_hash) -> bool` for simple hash comparison
+- Created `crates/engram-ingest/src/hash.rs` as a new module, re-exported from lib.rs
+- Added sha2 v0.10 dependency to engram-ingest
+- 8 unit tests: deterministic hashing, hex encoding (64 chars), different content produces different hashes, empty string known value, "hello" known value, same hash comparison, different hash comparison, whitespace sensitivity
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/lib.rs, crates/engram-ingest/src/hash.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - sha2 v0.10 is the current stable version; uses `Sha256::new()` + `update()` + `finalize()` pattern
+  - `format!("{:x}", hasher.finalize())` produces lowercase hex-encoded output
+  - engram-ingest now has 5 submodules: chunker.rs, detect.rs, hash.rs, markdown.rs, sliding.rs
+---
+
+## 2026-03-09 - US-022
+- Implemented `detect_changed_files(repo_path, since_commit, source_config) -> Result<ChangedFiles>` in engram-ingest
+- Created `crates/engram-ingest/src/diff.rs` as a new module, re-exported from lib.rs
+- `ChangedFiles` struct with `added`, `modified`, `deleted` `Vec<PathBuf>` fields
+- Full index mode (since_commit=None): walks HEAD tree, returns all blobs as "added"
+- Diff mode (since_commit=Some): uses `diff_tree_to_tree` between old commit and HEAD
+- Handles Added, Modified, Deleted, Renamed, Copied delta statuses
+- Include/exclude glob filtering via `globset` crate; empty patterns = no filtering
+- Added git2 v0.19, globset v0.4, tempfile v3 (dev) dependencies to engram-ingest
+- 12 unit tests: full index, added/modified/deleted detection, include/exclude filters, combined filters, mixed changes, no changes, sorted output, nested directories
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/lib.rs, crates/engram-ingest/src/diff.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - git2 borrow checker: scope `tree`/`index` borrows in a block `{}` before returning/moving `repo`
+  - globset v0.4 is the crate for glob matching; `GlobSetBuilder` builds a set of patterns for efficient matching
+  - `tree.walk(PreOrder, callback)` with `ObjectType::Blob` filter lists all files in a tree
+  - `diff_tree_to_tree` compares two trees; `diff.foreach` iterates deltas with status (Added/Modified/Deleted/Renamed/Copied)
+  - engram-ingest now has 6 submodules: chunker.rs, detect.rs, diff.rs, hash.rs, markdown.rs, sliding.rs
+---
+
+## 2026-03-09 - US-023
+- Implemented IngestPipeline struct with `async fn run(source, store, provider, full) -> Result<IngestReport>`
+- Created `crates/engram-ingest/src/pipeline.rs` as a new module, re-exported from lib.rs
+- IngestReport struct with 5 fields: files_processed, chunks_created, chunks_skipped, chunks_deleted, embed_calls
+- Pipeline steps: detect changed files → chunk each file → compute content hashes → skip unchanged chunks (reuse old embeddings) → batch-embed new/modified chunks → write .chunks.jsonl and .embeddings.bin → remove files for deleted sources → update manifest.json → invalidate cache fingerprint → commit changes
+- Incremental mode uses manifest's last_indexed_commit for git diff; full mode treats all files as added
+- Content hash comparison by chunk name detects unchanged chunks; old embedding vectors reused from existing .embeddings.bin
+- Batch embedding respects provider's max_batch_size; embed_calls counts actual API calls
+- Commit message format: `engram: reindex N files, M chunks updated`
+- Added engram-store as a dependency; async-trait + tokio as dev-dependencies
+- 7 integration tests: full ingest, commit verification, incremental skip, deletion handling, binary file skip, manifest population, chunks/embeddings file verification
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/lib.rs, crates/engram-ingest/src/pipeline.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - engram-ingest now depends on engram-store for writing chunks/embeddings/manifest and committing
+  - engram-ingest now has 7 submodules: chunker.rs, detect.rs, diff.rs, hash.rs, markdown.rs, pipeline.rs, sliding.rs
+  - EmbedError maps to EngramError::Embed(String) via `.map_err(|e| EngramError::Embed(e.to_string()))`
+  - Use `SystemTime::now().duration_since(UNIX_EPOCH)` for timestamps without adding chrono dependency
+  - For async tests: tokio needs "macros" + "rt-multi-thread" features; use `#[tokio::test]` attribute
+  - Mock EmbeddingProvider needs async-trait as dev-dependency to implement the trait in tests
+  - chunk_id format: `{source_name}#{relative_path}#{chunk_name}` for unique identification
+  - SlidingWindowChunker defaults: max_tokens=500, overlap_tokens=50 for unsupported languages
+- usearch v2.24.0 for HNSW indexing: Index::new(&IndexOptions), add(key: u64, &[f32]), search(&[f32], top_k) -> Matches { keys, distances }
+- usearch save/load take `&str` not `&Path`; MetricKind::Cos for cosine similarity; ScalarKind::F32 for full precision
+- BM25 returns descending f64 scores; HNSW returns ascending f32 distances — normalize before combining in hybrid search
+- engram-cache depends on engram-query; engram-query CANNOT depend on engram-cache (circular dependency)
+- ChunkMetadata.embedding_offset is u64; cast with `as usize` for indexing into Vec<f32>
+---
+
+## 2026-03-09 - US-024
+- Implemented HnswIndex struct in engram-query wrapping the usearch crate (v2.24.0)
+- HnswIndex::build(entries, dimensions) constructs index from (u64 key, &[f32] vector) pairs using cosine metric
+- HnswIndex::search(query, top_k) returns Vec<(u64, f32)> sorted by ascending distance
+- HnswIndex::save(path) and HnswIndex::load(path, dimensions) for persistence to/from disk
+- Helper methods: len(), is_empty(), dimensions()
+- 8 unit tests: build+search, empty index, ascending distance order, save/load round-trip, dimensions accessor, top_k limit, single vector self-distance, nonexistent file error
+- Files changed: crates/engram-query/Cargo.toml, crates/engram-query/src/lib.rs, crates/engram-query/src/hnsw.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - usearch v2.24.0: Index::new(&IndexOptions) returns Result<Index, Exception>; use new_index() as alternative
+  - IndexOptions defaults: dimensions=256, metric=Cos, quantization=BF16, connectivity/expansion=0 (auto), multi=false
+  - usearch Key type is u64; Matches struct has parallel `keys: Vec<u64>` and `distances: Vec<f32>` fields
+  - save/load take `&str` paths, not `&Path` — need .to_str() conversion
+  - For cosine metric, self-distance is ~0; results are pre-sorted by ascending distance
+  - usearch requires C++ compilation via cxx-build — adds compile time but no runtime overhead
+  - engram-query now depends on engram-core (for EngramError/Result) and usearch
+---
+
+## 2026-03-09 - US-025
+- Implemented Bm25Index struct in engram-query for keyword search over chunk metadata
+- Bm25Index::build(documents) constructs from Bm25Document (key, name, signature, tags)
+- Bm25Index::search(query, top_k) returns Vec<(u64, f64)> sorted by descending BM25 score
+- BM25 scoring with standard parameters k1=1.2, b=0.75; IDF uses log((N - df + 0.5) / (df + 0.5) + 1)
+- Tokenization splits on non-alphanumeric boundaries (preserving underscores) and lowercases
+- Bm25Index::save(path) and ::load(path) serialize/deserialize via JSON using serde
+- Helper methods: len(), is_empty()
+- 11 unit tests: build+search, empty index, descending score order, standard params, tokenization, tags search, signature search, top_k limit, save/load round-trip, no match, case insensitivity
+- Files changed: crates/engram-query/Cargo.toml, crates/engram-query/src/lib.rs, crates/engram-query/src/bm25.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - BM25 uses f64 scores (not f32 like HNSW distances) for precision in scoring calculations
+  - Bm25Document is a separate input struct (not ChunkMetadata directly) to decouple query from core types
+  - serde + serde_json added to engram-query for BM25 index persistence (HNSW uses usearch's native save/load)
+  - Tokenizer preserves underscores in identifiers (e.g., "hello_world" stays as one token) — important for code search
+  - BM25 search returns descending scores (higher = more relevant), opposite of HNSW ascending distances
+  - engram-query now exports: HnswIndex, Bm25Index, Bm25Document
+---
+
+## 2026-03-09 - US-026
+- Implemented HybridSearch struct in engram-query combining HNSW vector search and BM25 keyword search
+- Created `crates/engram-query/src/hybrid.rs` as a new module, re-exported from lib.rs
+- HybridSearch::new(hnsw, bm25, metadata) constructs from pre-built indexes and a HashMap<u64, ChunkEntry>
+- HybridSearch::search(query, query_embedding, top_k, alpha) is async, returns Vec<SearchResult>
+- SearchResult struct with 9 fields: chunk_id, score, kind, name, signature, file, repo, lines (tuple), stale
+- ChunkEntry struct holds metadata needed to build SearchResults from u64 keys
+- Score = alpha * normalized_vector_score + (1 - alpha) * normalized_bm25_score
+- Vector normalization: min-max on distances, inverted (lower distance = higher score)
+- BM25 normalization: min-max on scores (higher score stays higher)
+- Single results normalize to 1.0; equal values normalize to 1.0
+- DEFAULT_ALPHA = 0.7 (favors semantic/vector search)
+- Results deduplicated by u64 key via HashMap combination; fetches 3x top_k candidates for merging
+- Added tokio dev-dependency with "macros" + "rt-multi-thread" features for async tests
+- 15 unit tests: hybrid search, descending scores, default alpha, all fields, deduplication, alpha=1 vector-only, alpha=0 bm25-only, empty indexes, top_k limit, stale propagation, normalization (vector, bm25, empty, single, equal)
+- Files changed: crates/engram-query/Cargo.toml, crates/engram-query/src/lib.rs, crates/engram-query/src/hybrid.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - async fn in impl blocks works fine with edition 2021 (no async-trait needed for concrete structs)
+  - HybridSearch fetches 3x top_k from each sub-index to ensure enough candidates for merging
+  - BM25 returns descending f64 scores; HNSW returns ascending f32 distances — normalize before combining in hybrid search
+  - engram-query now exports: HnswIndex, Bm25Index, Bm25Document, HybridSearch, SearchResult, ChunkEntry, DEFAULT_ALPHA
+---
+
+## 2026-03-09 - US-027
+- Implemented MetadataIndex struct in engram-query with O(1) HashMap-based lookups
+- Created `crates/engram-query/src/metadata.rs` as a new module, re-exported from lib.rs
+- MetadataIndex::build(chunks) constructs 4 indexes: by_id (chunk_id->ChunkMetadata), by_file (file_path->Vec), by_symbol (name->Vec), by_tag (tag->Vec)
+- File path extracted from chunk_id format `{source}#{path}#{name}` using first/last `#` separator parsing
+- 4 lookup methods: lookup_by_id, lookup_by_file, lookup_by_symbol, lookup_by_tag — all return Option references
+- 9 unit tests: id lookup, file grouping, symbol grouping across files, tag lookup, empty index, file path extraction, fallback parsing, large dataset O(1), no-tags chunk
+- Files changed: crates/engram-query/src/metadata.rs (new), crates/engram-query/src/lib.rs
+- **Learnings for future iterations:**
+  - chunk_id format is `{source_name}#{relative_path}#{chunk_name}` — use first/last `#` to extract file path
+  - No new dependencies needed — only std::collections::HashMap and engram_core::ChunkMetadata
+  - engram-query now has 4 submodules: bm25.rs, hnsw.rs, hybrid.rs, metadata.rs
+  - engram-query now exports: HnswIndex, Bm25Index, Bm25Document, HybridSearch, SearchResult, ChunkEntry, DEFAULT_ALPHA, MetadataIndex
+---
+
+## 2026-03-09 - US-028
+- Implemented `write_cache(cache_dir, hnsw, bm25, metadata, manifest_hash)` in engram-cache
+- Writes 4 files to cache_dir: fingerprint (manifest hash string), hnsw.index (via HnswIndex::save), bm25.index (via Bm25Index::save), metadata.bin (JSON-serialized Vec<ChunkMetadata>)
+- Creates cache directory (and parents) if it doesn't exist
+- 5 unit tests: all files created, fingerprint content, directory creation, metadata deserialization, overwrite existing cache
+- Files changed: crates/engram-cache/Cargo.toml, crates/engram-cache/src/lib.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - engram-cache depends on engram-core (ChunkMetadata, EngramError, Result) and engram-query (HnswIndex, Bm25Index)
+  - metadata parameter is `&[ChunkMetadata]` not `&MetadataIndex` — MetadataIndex has private fields and no serialization; store raw chunks and rebuild on load
+  - metadata.bin uses serde_json::to_vec for serialization (JSON bytes despite .bin extension)
+  - HnswIndex::save and Bm25Index::save handle their own serialization formats (usearch native and JSON respectively)
+  - serde_json v1 added as dependency for metadata serialization; tempfile v3 as dev-dependency for test isolation
+---
+
+## 2026-03-09 - US-029
+- Implemented `try_load_cache(cache_dir, current_manifest_hash) -> Result<Option<CachedIndex>>` in engram-cache
+- Created `CachedIndex` struct with hnsw (HnswIndex), bm25 (Bm25Index), metadata (Vec<ChunkMetadata>) fields
+- Updated `write_cache` to also persist HNSW dimensions to a `dimensions` file (needed for HnswIndex::load)
+- Fingerprint validation: reads fingerprint file, returns None if missing or mismatched
+- Graceful degradation: any corrupted or missing cache file returns None (no panic)
+- Loads hnsw.index via HnswIndex::load, bm25.index via Bm25Index::load, metadata.bin via serde_json::from_slice
+- 5 new tests: valid cache hit, fingerprint mismatch, no cache dir, corrupted metadata, missing bm25 file
+- Files changed: crates/engram-cache/src/lib.rs
+- **Learnings for future iterations:**
+  - HnswIndex::load requires dimensions parameter — must be stored alongside cache files
+  - write_cache now writes 5 files (added `dimensions` text file with usize as string)
+  - Use match-and-return-None pattern for graceful cache failure (not `?` operator which would propagate errors)
+  - CachedIndex stores raw Vec<ChunkMetadata> not MetadataIndex — MetadataIndex has private fields and no serialization
+  - engram-cache now exports: write_cache, try_load_cache, CachedIndex
+---
+
+## 2026-03-09 - US-030
+- Implemented `invalidate_cache(cache_dir) -> Result<()>` in engram-cache
+- Deletes the `fingerprint` file from the cache directory, causing `try_load_cache` to return `None` on next call
+- No-op if the fingerprint file doesn't exist (handles missing cache dir gracefully)
+- 3 new tests: fingerprint removal, invalidation breaks cache load, noop when no cache
+- Files changed: crates/engram-cache/src/lib.rs
+- **Learnings for future iterations:**
+  - `std::io::ErrorKind::NotFound` pattern in match arms is idiomatic for "delete if exists" operations
+  - engram-cache now exports: write_cache, try_load_cache, invalidate_cache, CachedIndex
+---
+
+## 2026-03-09 - US-031
+- Implemented IndexManager struct in engram-query with `async fn boot(store_root, config) -> Result<Self>`
+- Created `crates/engram-query/src/boot.rs` as a new module, re-exported from lib.rs
+- Boot sequence: read manifest.json → compute SHA-256 manifest hash → try cache → cold boot if miss
+- Cold boot: recursively walk `index/` for `.chunks.jsonl` files, read corresponding `.embeddings.bin`, build HNSW/BM25/MetadataIndex, write compiled cache
+- Cache fast path: validate fingerprint against manifest hash, load hnsw.index/bm25.index/metadata.bin
+- IndexManager exposes hnsw(), bm25(), metadata() accessor methods
+- Boot reports timing via eprintln: "Boot completed in Xms (cache hit)" or "Boot completed in Xs (cold, N chunks)"
+- Cache logic inlined (not using engram-cache crate) to avoid circular dependency (engram-cache depends on engram-query)
+- Added engram-store and sha2 v0.10 as dependencies to engram-query
+- 7 async integration tests: cold boot populates indexes, cache written on cold, cache hit on second boot, no manifest error, empty index, multiple source files, search works after boot
+- Files changed: crates/engram-query/Cargo.toml, crates/engram-query/src/lib.rs, crates/engram-query/src/boot.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - engram-cache depends on engram-query → engram-query CANNOT depend on engram-cache (circular dependency); cache logic must be inlined
+  - ChunkMetadata.embedding_offset is u64; cast to usize with `as usize` for indexing into flat Vec<f32>
+  - sha2 v0.10: `Sha256::digest(bytes)` returns hash, `format!("{:x}", hash)` for hex string
+  - std::fs recursive directory walking works fine for finding .chunks.jsonl files; sort results for deterministic ordering
+  - Corresponding .embeddings.bin path derived by replacing `.chunks.jsonl` suffix with `.embeddings.bin`
+  - engram-query now has 5 submodules: bm25.rs, boot.rs, hnsw.rs, hybrid.rs, metadata.rs
+  - engram-query now exports: HnswIndex, Bm25Index, Bm25Document, HybridSearch, SearchResult, ChunkEntry, DEFAULT_ALPHA, MetadataIndex, IndexManager
+---
+
+## 2026-03-09 - US-032
+- Implemented `check_staleness(chunks, source_repo_path) -> Result<HashMap<String, bool>>` in engram-query
+- Created `crates/engram-query/src/staleness.rs` as a new module, re-exported from lib.rs
+- A chunk is stale if its source_commit is not an ancestor of (or equal to) HEAD
+- Uses `repo.graph_descendant_of(head_oid, commit_oid)` to check ancestry
+- Handles edge cases: empty source_commit, invalid OID strings, unknown commits — all treated as stale
+- Stale chunks are still served (not removed) — staleness is informational only
+- Added git2 v0.19 as a dependency to engram-query
+- 8 unit tests: head commit not stale, ancestor not stale, unknown commit stale, empty commit stale, invalid OID stale, mixed staleness, empty chunks, entry per chunk
+- Files changed: crates/engram-query/Cargo.toml, crates/engram-query/src/lib.rs, crates/engram-query/src/staleness.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - `repo.graph_descendant_of(a, b)` returns true if `b` is an ancestor of `a` — parameter order matters
+  - git2 is now a dependency of engram-query (was already in engram-store and engram-ingest)
+  - engram-query now has 6 submodules: bm25.rs, boot.rs, hnsw.rs, hybrid.rs, metadata.rs, staleness.rs
+  - engram-query now exports: HnswIndex, Bm25Index, Bm25Document, HybridSearch, SearchResult, ChunkEntry, DEFAULT_ALPHA, MetadataIndex, IndexManager, check_staleness
+---
+
+## 2026-03-09 - US-033
+- Implemented MCP server bootstrap with JSON-RPC 2.0 over stdio in engram-mcp
+- Created 3 modules: protocol.rs (JSON-RPC types), server.rs (McpServer with async reader/writer), tools.rs (Phase 1 tool definitions)
+- McpServer::run<R, W> is generic over AsyncRead/AsyncWrite for testability
+- Handles `initialize` (returns capabilities with tools), `tools/list` (returns 3 Phase 1 tools), `tools/call` (dispatches by tool name, stubs for now)
+- Phase 1 tool definitions: engram_search (query required), engram_lookup (identifier required), engram_status (no required params)
+- Notifications (no id) are logged and skipped; unknown methods return METHOD_NOT_FOUND
+- Parse errors return PARSE_ERROR; empty lines skipped; all logging to stderr
+- 25 unit tests: protocol types (6), server behavior (12), tool definitions (7)
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/lib.rs, crates/engram-mcp/src/protocol.rs, crates/engram-mcp/src/server.rs, crates/engram-mcp/src/tools.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - MCP stdio transport uses newline-delimited JSON-RPC (one JSON object per line)
+  - Generic `run<R, W>(reader: R, writer: W)` pattern allows testing with in-memory buffers instead of actual stdin/stdout
+  - MCP protocol version is "2024-11-05"; server capabilities declare which features are supported (e.g., `"tools": {}`)
+  - tools/call unknown tools return success with `isError: true` content (not a JSON-RPC error) per MCP spec
+  - engram-mcp depends on engram-core (for EngramError), serde, serde_json, tokio (io-std, io-util, macros, rt-multi-thread)
+  - engram-mcp now has 3 submodules: protocol.rs, server.rs, tools.rs
+  - engram-mcp exports: JsonRpcRequest, JsonRpcResponse, JsonRpcError, McpServer, phase1_tool_definitions, PARSE_ERROR, METHOD_NOT_FOUND, INVALID_PARAMS
+---
+
+## 2026-03-09 - US-034
+- Implemented engram_search MCP tool with full hybrid semantic + keyword search
+- McpServer now holds optional EngineState (HybridSearch + Box<dyn EmbeddingProvider>)
+- McpServer::new() for no-engine mode, McpServer::with_engine() for search-capable mode
+- Search handler: parses query/scope/top_k/compact args, embeds query, runs hybrid search, filters by scope, formats response
+- Scope filtering: "code" = Function/Class/Method/Type/Impl/Module/Other; "docs" = DocSection/Readme/CommentBlock; "all" = no filter
+- Compact mode: omits signatures, truncates names >50 chars with "..."
+- Response includes meta: { code_count, search_time_ms, compact }
+- Added engram-query and async-trait as dependencies to engram-mcp
+- handle_request and handle_tools_call are now async to support embedding/search operations
+- 44 tests pass (13 new search tests + existing server/protocol/tools tests)
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/lib.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - McpServer now requires EngineState for search tools — future tool handlers (US-035, US-036) should follow same pattern
+  - usearch::Index is Send+Sync, so HybridSearch can be held in EngineState without Mutex
+  - Clippy requires Default impl when providing new() — add `impl Default` alongside `fn new()`
+  - MCP tool errors return success with `isError: true` content, not JSON-RPC errors
+  - MockEmbeddingProvider pattern: use deterministic vectors based on text length for reproducible tests
+  - tool_error_response helper simplifies returning tool-level errors consistently
+---
+
+## 2026-03-09 - US-035
+- Implemented engram_lookup MCP tool for direct chunk lookup by chunk ID, file path, or symbol name
+- Added lookup_by_chunk_id, lookup_by_file, lookup_by_symbol methods to HybridSearch in engram-query
+- Added source_roots field to EngineState and with_engine_and_sources constructor for content reading
+- Identifier type detection: contains # → chunk ID, contains / or . → file path, otherwise → symbol name
+- include_content parameter reads raw source text via source_roots mapping; returns null when unavailable
+- Returns empty array (not error) for no matches
+- 12 new tests covering all lookup modes, include_content with and without source_roots, edge cases
+- Files changed: crates/engram-query/src/hybrid.rs, crates/engram-mcp/src/server.rs, crates/engram-mcp/Cargo.toml
+- **Learnings for future iterations:**
+  - HybridSearch.metadata is HashMap<u64, ChunkEntry> keyed by numeric key, not by chunk_id — lookup methods must iterate values
+  - EngineState.source_roots maps repo name → local path for reading source content
+  - tempfile v3 added as dev-dependency for tests that need real filesystem content
+  - Existing test helpers (build_test_engine, run_server_with_engine) use no source_roots — new with_engine_and_sources constructor needed for content tests
+---
+
+## 2026-03-09 - US-036
+- Implemented engram_status MCP tool that returns index health and configuration
+- Added `chunk_count()` and `repo_stats()` methods to HybridSearch in engram-query
+- Added status metadata fields to EngineState: boot_time_ms, store_path, cache_status
+- Replaced engram_status stub with full handler returning JSON with: total_chunks, source_repos, cache_status, boot_time_ms, embedding_provider, store_path
+- Added 10 tests covering: no-engine error, all required response fields, stale chunk counting, no-params requirement
+- Files changed: crates/engram-query/src/hybrid.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - HybridSearch.metadata can be iterated to compute aggregate stats — added chunk_count() and repo_stats() for this
+  - EngineState needs extra fields beyond search+provider for status reporting; boot_time_ms, store_path, cache_status added with defaults in constructors
+  - EmbeddingProvider trait has `name()` method returning provider string like "ollama/nomic-embed-text" — used for status response
+  - The with_engine() constructor defaults new fields (boot_time_ms=0, store_path="", cache_status="none") — callers setting up real engines should set these
+---
+
+## 2026-03-09 - US-037
+- Implemented `engram init --local [--path <dir>]` CLI command using clap derive macros
+- Added clap v4, engram-core, and engram-store as dependencies to engram-cli
+- CLI checks for `.engram` directory to detect existing stores (exits with code 1 if exists)
+- Defaults path to `./engram-store` when `--path` is not specified
+- 5 tests: store creation, already-exists detection, default path, custom path, success verification
+- Files changed: crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - clap v4 with "derive" feature provides `Parser` and `Subcommand` derive macros for declarative CLI definition
+  - Use `Cli::parse_from(["binary", "args"...])` in tests to test clap argument parsing without running the binary
+  - Check for `.engram` directory existence to detect if a store already exists at a path
+---
+
+## 2026-03-09 - US-038
+- Implemented `engram reindex` CLI command with `--full`, `--incremental`, `--paths <glob>`, `--repo <name>`, and `--path` flags
+- Created `provider.rs` with OllamaProvider (minimal HTTP client for Ollama /api/embed endpoint)
+- Added `load_config()` to read engram.config.yaml from store directory
+- Added `run_reindex()` async function that iterates sources, applies --paths filter, and runs IngestPipeline
+- main() now uses `#[tokio::main]` for async support
+- 21 tests: 8 arg parsing, 3 config loading, 4 pipeline integration, 6 existing init tests
+- Files changed: crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs, crates/engram-cli/src/provider.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - engram-cli now depends on engram-ingest, tokio, serde_yaml, serde_json, reqwest, async-trait
+  - git2 v0.19 added as dev-dependency for setting up test source repos
+  - `conflicts_with` in clap ensures --full and --incremental are mutually exclusive
+  - --paths filter works by replacing the source's include list with the provided glob
+  - OllamaProvider in provider.rs is a minimal implementation; future provider crates (US-096+) will be more complete
+  - Use `Cli::try_parse_from()` to test expected parse failures (vs `parse_from` which panics)
+---
+
+## 2026-03-09 - US-039
+- Implemented `engram serve` CLI command with stdio transport and boot sequence
+- Added `Serve` variant to Commands enum with --transport, --port, --context, --path args
+- Added `Transport` enum (Stdio, Sse) using clap `ValueEnum`
+- Added `into_hybrid_search()` method to IndexManager to convert boot result into HybridSearch
+- Added `set_boot_info()` method to McpServer for setting boot timing metadata
+- Added `boot_time_ms`, `cache_status`, `chunks` fields to IndexManager struct
+- SSE transport returns error (Phase 1 only supports stdio)
+- Boot sequence: load config → boot IndexManager → build source_roots → create McpServer → run stdio
+- Boot timing and index stats logged to stderr
+- 6 new CLI arg parsing tests for serve command
+- Files changed: crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs, crates/engram-mcp/src/server.rs, crates/engram-query/src/boot.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - IndexManager stores ordered chunks so `into_hybrid_search()` can map them to u64 keys matching HNSW/BM25 index positions
+  - chunk_id format `{repo}#{file_path}#{chunk_name}` — extract_repo_file splits on first and last `#`
+  - engram-cli now depends on engram-mcp and engram-query for the serve command
+  - McpServer.set_boot_info() must be called after construction to populate EngineState boot metadata
+  - Transport enum uses clap's ValueEnum derive for automatic CLI parsing
+---
+
+## 2026-03-09 - US-040
+- Implemented `engram status` CLI command that reads store health without booting the full index
+- Prints: chunk count, source repos, last indexed commit, staleness summary (compares manifest commit vs source repo HEAD), cache status (warm/cold), embedding provider
+- If no store found, prints error suggesting `engram init`
+- Moved git2 from dev-dependency to regular dependency in engram-cli (needed for staleness checks)
+- Files changed: crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs
+- **Learnings for future iterations:**
+  - `read_manifest` from engram-store gives quick access to chunk_count, last_indexed_commit, source_repos without booting the full index
+  - Status-like commands can avoid the expensive IndexManager::boot by reading manifest + config directly
+  - The manifest has a single `last_indexed_commit` (not per-repo) — for multi-repo support, per-repo commit tracking would be needed
+  - Cache warmth can be detected by checking `.engram-cache/fingerprint` existence
+---
+
+## 2026-03-09 - US-041
+- Defined 4 knowledge item types in engram-core: Decision, Lesson, Pattern, GlossaryEntry
+- Each type derives Serialize, Deserialize, Debug, Clone, PartialEq
+- Decision: id, title, status, context, decision, consequences, related_files, contributed_by, created_at, embedding_ref (Option)
+- Lesson: id, title, description, trigger, resolution, related_files, contributed_by, created_at, embedding_ref (Option)
+- Pattern: id, name, description, examples, anti_patterns, contributed_by, created_at, embedding_ref (Option)
+- GlossaryEntry: term, definition, context, contributed_by, created_at (no embedding_ref)
+- All types round-trip through YAML (serde_yaml)
+- Files changed: crates/engram-core/src/knowledge.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Knowledge types follow the same one-module-per-concept pattern as chunk.rs, embedding.rs, etc.
+  - embedding_ref is Option<String> — not all items have embeddings immediately
+  - GlossaryEntry intentionally has no embedding_ref field (simpler type for terminology)
+  - YAML round-trip tests use serde_yaml::to_string + from_str pattern
+---
+
+## 2026-03-09 - US-042
+- Implemented Snapshot struct with fields: session_id, summary, key_context (Vec<String>), full_transcript, created_at, tier
+- Implemented SnapshotTier enum with variants: Active, Compressed, Archived (using serde rename_all snake_case)
+- All types derive Serialize, Deserialize, Debug, Clone, PartialEq
+- Tests verify YAML serialization round-trip, all tier variants, and derive traits
+- Files changed: crates/engram-core/src/snapshot.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Snapshot follows same pattern as knowledge types: one module file, YAML round-trip tests
+  - SnapshotTier uses `#[serde(rename_all = "snake_case")]` consistent with other enums
+  - key_context is Vec<String> to hold multiple context items per snapshot
+---
+
+## 2026-03-09 - US-043
+- Defined onboarding knowledge types: ProjectOverview, BuildTestCommands, ArchitectureMap, KeyAbstractions
+- Supporting types: CommandInfo, DirectoryInfo, Abstraction, PatternInfo
+- All types serialize/deserialize to YAML with round-trip tests
+- Optional fields use `skip_serializing_if = "Option::is_none"` for clean YAML output
+- Files changed: crates/engram-core/src/onboarding.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Onboarding types follow same one-module-per-concept pattern as knowledge.rs and snapshot.rs
+  - Use `skip_serializing_if = "Option::is_none"` to keep YAML output clean for optional fields
+  - CommandInfo is a reusable sub-struct shared across build/test/lint/run commands
+  - All 8 onboarding types are re-exported from engram_core via lib.rs pub use
+---
+
+## 2026-03-09 - US-044
+- Implemented knowledge YAML write functions in engram-store: write_decision, write_lesson, write_pattern, write_glossary_entry
+- write_decision: writes to knowledge/decisions/{date}_{slug}.yaml (date extracted from created_at)
+- write_lesson: writes to knowledge/lessons/{date}_{slug}.yaml
+- write_pattern: writes to knowledge/patterns/{slug}.yaml (no date prefix — living documents)
+- write_glossary_entry: writes to knowledge/glossary/terms.yaml (appends new entries or updates existing by matching term)
+- Slug generation: lowercase + replace spaces with hyphens
+- All functions return Result<PathBuf> with the written file path
+- 10 new tests: slugify, each write type, append/update glossary, human-readable YAML, no-date prefix for patterns, auto-creates parent dirs
+- All 45 engram-store tests pass, clippy clean
+- Files changed: crates/engram-store/src/knowledge.rs (new), crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - Knowledge write functions follow standalone-function pattern (like write_manifest, write_chunks_jsonl) — not methods on Store struct
+  - Glossary uses Vec<GlossaryEntry> serialized as YAML list for append/update semantics
+  - serde_yaml serialization produces human-readable YAML by default (no special multiline handling needed)
+  - Parent directories auto-created via fs::create_dir_all for robustness
+---
+
+## 2026-03-10 - US-045
+- Implemented knowledge item embedding and indexing at boot time
+- Added `Knowledge` variant to `ChunkKind` enum for identifying knowledge items in search results
+- Added `HnswIndex::add()` method for inserting vectors after initial build
+- Modified `IndexManager::boot()` to scan knowledge embeddings and load them into HNSW at `KNOWLEDGE_KEY_OFFSET` (2,000,000) representing partition 2
+- Knowledge items get synthetic `ChunkMetadata` entries (chunk_id: `knowledge#{kind}:{id}`) and are included in BM25 and HybridSearch metadata
+- Both cold boot and cache-hit paths load knowledge embeddings
+- Fixed clippy `unnecessary_map_or` warnings in knowledge.rs (`map_or(false, ...)` → `is_some_and(...)`)
+- Files changed: crates/engram-core/src/chunk.rs, crates/engram-store/src/knowledge.rs, crates/engram-query/src/boot.rs, crates/engram-query/src/hnsw.rs, crates/engram-query/src/lib.rs
+- **Learnings for future iterations:**
+  - HNSW key ranges represent partitions: 0..N for code, KNOWLEDGE_KEY_OFFSET+i for knowledge (partition 2)
+  - usearch Index supports incremental add after build — just call reserve() then add()
+  - Cache stores only code chunk data; knowledge embeddings re-loaded from disk on every boot (they change more frequently)
+  - Clippy Rust 1.93+ enforces `is_some_and()` over `map_or(false, ...)` via `unnecessary_map_or` lint
+---
+
+## 2026-03-10 - US-046
+- Implemented snapshot write/read with tiered storage in engram-store
+- Added `embedding_ref: Option<String>` field to Snapshot in engram-core (with `#[serde(default)]`)
+- Created `snapshot.rs` module with: write_snapshot, read_snapshot, write_snapshot_with_embedding, snapshot_embed_text, scan_snapshot_embeddings, SnapshotEmbeddingInfo
+- write_snapshot writes to `snapshots/active/{timestamp}_{session_id}.yaml` with sanitized timestamps
+- read_snapshot searches active/compressed/archived tiers and transparently decompresses `.yaml.zst` via zstd
+- Added zstd v0.13 dependency for compression support
+- Embedding support follows same pattern as knowledge items (partition 3 for HNSW indexing)
+- Files changed: crates/engram-core/src/snapshot.rs, crates/engram-store/Cargo.toml, crates/engram-store/src/lib.rs, crates/engram-store/src/snapshot.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - zstd v0.13 is compatible; use `zstd::Decoder::new()` for decompression and `zstd::encode_all()` for compression in tests
+  - Snapshot filenames use sanitized timestamps (colons replaced with hyphens) for filesystem compatibility
+  - When adding fields to shared types in engram-core, add `#[serde(default)]` to maintain backwards compatibility with existing YAML files
+  - Follow the knowledge.rs pattern for embedding support: embed_text(), write_with_embedding(), scan_embeddings(), EmbeddingInfo struct
+---
+
+## 2026-03-10 - US-047
+- Implemented `compact_snapshots(store_root) -> Result<CompactReport>` for snapshot tier promotion
+- Active snapshots older than 7 days are zstd-compressed and moved to `compressed/`
+- Compressed snapshots older than 90 days are moved to `archived/`
+- Original uncompressed files deleted after successful compression
+- Associated `.embedding.bin` files are moved alongside their snapshots
+- CompactReport contains `active_to_compressed` and `compressed_to_archived` counts
+- 7 new tests covering: no-op, active→compressed, compressed→archived, embedding moves, empty store, mixed ages
+- Files changed: crates/engram-store/src/snapshot.rs, crates/engram-store/src/lib.rs
+- **Learnings for future iterations:**
+  - `std::fs::FileTimes` (not `std::time::FileTimes`) is the correct import for setting file modified times in tests
+  - `File::options().write(true).open(path)` + `file.set_times(times)` to backdate files for age-based testing
+  - `file_age()` using filesystem mtime is simpler and more reliable than parsing timestamps from filenames
+  - When moving files between tiers, remember to also move associated sidecar files (e.g., `.embedding.bin`)
+---
+
+## 2026-03-10 - US-048
+- Implemented `engram_record_decision` MCP tool for recording architectural decisions to the knowledge base
+- Tool accepts required params (title, context, decision) and optional params (consequences, related_files, status)
+- Auto-generates id (DEC-{uuid}), contributed_by ("mcp-agent"), created_at (ISO 8601 UTC)
+- Writes decision YAML with embedding, commits to git store
+- Returns JSON with id, path, and committed: true
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - engram-mcp now depends on engram-store, git2, chrono, uuid for knowledge recording tools
+  - Knowledge tool definitions are in a separate `knowledge_tool_definitions()` fn merged in `handle_tools_list`
+  - Handler pattern for knowledge tools: validate state → extract params → build struct → embed → write_with_embedding → commit → respond
+  - `build_test_engine_with_store()` and `run_server_with_store()` test helpers create a temp git repo for knowledge tool tests
+  - serde_yaml is a dev-dependency for deserializing YAML in tests
+---
+
+## 2026-03-10 - US-049
+- Implemented `engram_record_lesson` MCP tool for recording lessons learned to the knowledge base
+- Tool name: `engram_record_lesson` with required params: title, description, trigger; optional: resolution, related_files
+- Auto-generates id (LES-{uuid}), contributed_by ("mcp-agent"), created_at (UTC timestamp)
+- Writes lesson YAML, embeds it, commits to store; returns JSON with id, path, committed
+- Files changed: crates/engram-mcp/src/tools.rs (tool definition + tests), crates/engram-mcp/src/server.rs (handler + dispatch + 8 tests)
+- **Learnings for future iterations:**
+  - Knowledge tool implementation follows exact pattern from US-048 (record_decision): same state validation, param extraction, embed+write+commit flow
+  - `build_test_engine_with_store()` already creates knowledge/lessons directory — just needed to add it there
+  - Lesson ID prefix is "LES-" (cf. "DEC-" for decisions)
+  - Resolution is optional for lessons (defaults to empty string), unlike decisions where all 3 main fields are required
+---
+
+## 2026-03-10 - US-050
+- Implemented `engram_record_pattern` MCP tool with required params (name, description) and optional params (examples, anti_patterns)
+- Added tool definition to `knowledge_tool_definitions()` in tools.rs
+- Added handler `handle_engram_record_pattern` in server.rs following the same pattern as decision/lesson handlers
+- Added dispatch case in `handle_tools_call`
+- Auto-generates id (PAT-{uuid}), contributed_by, created_at
+- Writes pattern YAML, embeds it, commits to store
+- Returns JSON with id, path, committed: true
+- Updated `build_test_engine_with_store()` to also create `knowledge/patterns/` directory
+- 7 new tests: without engine error, missing name error, missing description error, writes and commits, optional params, auto-generated fields, JSON format
+- Updated tool count tests (knowledge: 2→3, tools/list: 5→6)
+- Files changed: crates/engram-mcp/src/tools.rs (tool definition + 2 tests), crates/engram-mcp/src/server.rs (handler + dispatch + 7 tests)
+- **Learnings for future iterations:**
+  - Pattern tool follows exact same handler pattern as decision (US-048) and lesson (US-049): validate state → extract params → build struct → embed → write_with_embedding → commit → respond
+  - Pattern ID prefix is "PAT-" (cf. "DEC-" for decisions, "LES-" for lessons)
+  - Patterns store in `knowledge/patterns/{slug}.yaml` with NO date prefix (unlike decisions/lessons)
+  - `build_test_engine_with_store()` now creates all 3 knowledge dirs: decisions, lessons, patterns
+---
+
+## 2026-03-10 - US-051
+- Implemented engram_record_glossary MCP tool for adding/updating project terminology
+- Tool writes to single `knowledge/glossary/terms.yaml` file (not per-item files like other knowledge tools)
+- Supports create (new term) and update (existing term) with `action` field in response
+- No embedding step — glossary entries are simpler than decisions/lessons/patterns
+- Files changed: crates/engram-mcp/Cargo.toml (added serde_yaml dep), crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - Glossary handler differs from other knowledge tools: no embedding, no UUID ID, returns `term` + `action` instead of `id` + `path`
+  - Had to add `serde_yaml` as a regular dependency (was only dev-dep) because handler needs to parse existing terms.yaml to determine create vs update
+  - `build_test_engine_with_store()` now creates all 4 knowledge dirs including glossary
+  - GlossaryEntry type was already defined in engram-core; write_glossary_entry() was already in engram-store — only the MCP tool handler was missing
+---
+
+## 2026-03-10 - US-052
+- Implemented engram_snapshot MCP tool for saving full conversation context
+- Tool definition added to knowledge_tool_definitions() with 4 required params: session_id, summary, key_context, full_transcript
+- Handler follows knowledge tool pattern: validate state → extract params → build Snapshot struct → embed summary+key_context → write_snapshot_with_embedding → commit → respond
+- Response includes session_id, path, tier: "active", committed: true
+- Snapshots always written to active tier (SnapshotTier::Active)
+- Commit message format: "engram: snapshot session {session_id}"
+- Files changed: crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - engram_snapshot follows the same handler pattern as knowledge tools but uses engram_store::write_snapshot_with_embedding() which handles YAML+embedding+re-write in one call
+  - Snapshot type and SnapshotTier already exist in engram-core (from US-046); snapshot store functions already exist in engram-store (from US-047)
+  - server.rs test_tools_list_returns_phase1_tools asserts total tool count (phase1 + knowledge) — must update when adding any new tool
+---
+
+## 2026-03-10 - US-053
+- Implemented index partitioning: 4 partitions (Code=0, Docs=1, Knowledge=2, Snapshots=3)
+- Added `Partition` enum to engram-core with `ChunkKind::partition()` mapping method
+- Added `Snapshot` variant to `ChunkKind`
+- Added `DOCS_KEY_OFFSET` (1M) and `SNAPSHOT_KEY_OFFSET` (3M) constants alongside existing `KNOWLEDGE_KEY_OFFSET` (2M)
+- Updated `IndexManager::boot()` cold path to assign partition-aware keys: code chunks → 0..n, doc chunks → DOCS_KEY_OFFSET+0..m, knowledge → KNOWLEDGE_KEY_OFFSET+0..k
+- Updated `IndexManager::into_hybrid_search()` to use partition-aware key assignment
+- Added partition filtering to `HybridSearch::search()` via `partitions: Option<&[Partition]>` parameter
+- Added `key_partition()` and `key_in_partitions()` helper functions for key range → partition mapping
+- Updated `engram_search` in engram-mcp to pass `None` for backward-compatible all-partition search
+- Added 6 new tests: key_partition_mapping, key_in_partitions_filter, search_filtered_to_code_excludes_knowledge, search_filtered_to_knowledge_only, search_with_multiple_partitions, search_none_partitions_returns_all
+- Files changed: crates/engram-core/src/chunk.rs, crates/engram-core/src/lib.rs, crates/engram-query/src/boot.rs, crates/engram-query/src/hybrid.rs, crates/engram-query/src/lib.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - When changing `HybridSearch::search()` signature, all callers must be updated (engram-mcp/src/server.rs + all tests)
+  - Iterator::partition() requires both output collections to implement Extend<Item> — easier to use a manual for loop when collecting indices
+  - Cache-hit path reuses cached HNSW/BM25 which already have partition-aware keys from previous cold boot
+---
+
+## 2026-03-10 - US-054
+- Implemented sidecar knowledge search in engram_search MCP tool
+- engram_search now runs two parallel queries: code/docs (partitions 0+1) and knowledge (partition 2)
+- Response includes both `code_results` and `knowledge_results` sections
+- Knowledge results include: kind, id, title, relevance_score, created_at (parsed from chunk_id format "knowledge#{kind}:{id}")
+- Knowledge results below min_relevance threshold (0.6) are dropped
+- Recency boost (1.1x) applied to knowledge items less than 30 days old (uses chrono for date parsing)
+- Scope parameter updated: "all" -> both code+knowledge, "code" -> code only, "docs" -> docs only, "knowledge" -> knowledge only
+- Added `tags` and `indexed_at` fields to ChunkEntry and SearchResult for knowledge metadata propagation
+- Files changed: crates/engram-query/src/hybrid.rs, crates/engram-query/src/boot.rs, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - When using `replace_all` on `data["results"]`, be careful not to also change lookup handler tests that still use "results" key
+  - Test engines must place doc items at DOCS_KEY_OFFSET (not in code key range) for partition-based scope filtering to work
+  - `matches_scope` helper was removed from production code (now uses partition-based filtering), moved to test module only
+  - format_knowledge_result extracts kind/id from chunk_id format "knowledge#{kind}:{id}" — this is the canonical format set in boot.rs
+---
+
+## 2026-03-10 - US-055
+- Implemented `detect_project_metadata(repo_path) -> Result<ProjectOverview>` in engram-ingest
+- Detects language from config files (Cargo.toml, package.json, go.mod, pyproject.toml, etc.) with file extension fallback
+- Detects framework from dependency files (actix-web, nestjs, react, django, gin, etc.) for Rust, Node, Python, Go
+- Detects package manager from lock files (Cargo.lock, pnpm-lock.yaml, yarn.lock, poetry.lock, etc.)
+- Detects repo type (monorepo vs single) from workspace configs (Cargo workspace, package.json workspaces, pnpm-workspace.yaml, lerna, go.work)
+- Finds entry points by convention (src/main.rs, src/index.ts, main.go, manage.py, etc.) and from Cargo workspace members
+- Distinguishes TypeScript vs JavaScript by checking for tsconfig.json presence
+- 16 tests covering all language/framework/package manager combinations, monorepo detection, empty directories, edge cases
+- Files changed: crates/engram-ingest/src/metadata.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - ProjectOverview type already exists in engram-core::onboarding — no need to define new types
+  - engram-ingest follows one-module-per-concept pattern: metadata.rs for project metadata detection
+  - Lock file detection order matters for package manager priority (pnpm-lock.yaml before package-lock.json)
+  - Cargo workspace member extraction uses simple string parsing of Cargo.toml (glob patterns in members are skipped)
+  - File extension counting uses recursive scan with depth limit (5) and skips hidden dirs, node_modules, target, vendor
+---
+
+## 2026-03-10 - US-056
+- Implemented `extract_build_commands(repo_path) -> Result<BuildTestCommands>` in engram-ingest
+- Created new `commands.rs` module with language-specific extraction:
+  - Rust: cargo build/test/clippy/run (workspace-aware)
+  - Node.js: parses package.json scripts, detects build/test/lint frameworks and config files
+  - Python: detects pytest/tox/unittest for testing, ruff/flake8 for linting
+  - Go: defaults to go build/test, golangci-lint, go run
+- Added `serde_json` dependency to engram-ingest for package.json parsing
+- Files changed: crates/engram-ingest/src/commands.rs (new), crates/engram-ingest/src/lib.rs, crates/engram-ingest/Cargo.toml
+- **Learnings for future iterations:**
+  - serde_json v1 is now a dependency of engram-ingest (for package.json parsing)
+  - `engram_core::EngramError::Config(String)` is used for JSON parse errors from config files
+  - Test framework detection uses two signals: command string content AND config file presence (jest.config.ts -> Jest)
+  - Node.js run command prefers "dev" script over "start" script
+  - Python test detection priority: pytest > tox > unittest (fallback)
+---
+
+## 2026-03-10 - US-057
+- Implemented `analyze_directory_structure(repo_path, source_config) -> Result<ArchitectureMap>` in new `architecture.rs` module
+- Walks directory tree, identifies directories by naming conventions (~80 patterns), and lists top 5 most important files per directory
+- Respects include/exclude globs from SourceConfig using globset
+- Entry-point files (index.ts, lib.rs, main.rs, __init__.py, etc.) are prioritized to top of key_files list
+- Skips hidden dirs, node_modules, target, dist, build, __pycache__, etc.
+- Files changed: crates/engram-ingest/src/architecture.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - engram-ingest follows one-module-per-concept: architecture.rs for directory analysis, matching chunker.rs, commands.rs, metadata.rs pattern
+  - globset GlobSet with empty patterns (`is_empty()` check) means "match all" — must guard include logic accordingly
+  - `infer_purpose` returns None for unrecognized directories, which filters them out of the ArchitectureMap (only recognized dirs are reported)
+  - File importance heuristic: entry-point files first, then by file size descending, then alphabetical for stability
+---
+
+## 2026-03-10 - US-058
+- Implemented `extract_key_abstractions(repo_path, language) -> Result<KeyAbstractions>` in `crates/engram-ingest/src/abstractions.rs`
+- Uses tree-sitter to find exported types, interfaces, classes, traits, enums, and type aliases
+- Prioritizes by: export status (+10), entry point file (+5), shallow directory depth (+3/(depth+1)), cross-file reference count (+2 per external ref), trait/interface kind (+3)
+- Extracts doc comments from adjacent sibling nodes (///, //, #, /*, /**)
+- Deduplicates by name (keeps highest-scored), limits to top 50
+- Detects patterns: trait-based abstraction, enum-based modeling, interface-driven design, class-based architecture, one-module-per-concept
+- Files changed: crates/engram-ingest/src/abstractions.rs (new), crates/engram-ingest/src/lib.rs
+- 12 new tests: all 162 engram-ingest tests pass
+- **Learnings for future iterations:**
+  - tree-sitter doc comment nodes are `line_comment`, `comment`, or `block_comment` siblings preceding the declaration node — use `prev_sibling()` to walk backwards
+  - Rust `pub` detection can be done by checking if the node text starts with "pub " (simpler than walking visibility_modifier children)
+  - Python top-level class definitions are implicitly exported (no explicit export keyword)
+  - For TS, exported declarations are wrapped in `export_statement` nodes — check children for the actual declaration type
+  - Reference counting via simple string `contains()` is adequate for ranking; more precise symbol resolution not needed for onboarding
+---
+
+## 2026-03-10 - US-059
+- Implemented full onboarding pipeline `run_onboarding()` in engram-ingest
+- Added `OnboardingDepth` enum (Quick, Standard, Deep) and `OnboardingReport` struct to engram-core
+- Pipeline writes YAML files to `knowledge/onboarding/`: project-overview.yaml, build-test-commands.yaml, architecture-map.yaml, key-abstractions.yaml
+- Quick: metadata + build commands (2 files); Standard/Deep: all 4 files
+- Commits to store git repo with descriptive message; idempotent (re-running overwrites files)
+- Files changed: crates/engram-core/src/onboarding.rs, crates/engram-core/src/lib.rs, crates/engram-ingest/src/onboarding.rs, crates/engram-ingest/src/lib.rs, crates/engram-ingest/Cargo.toml
+- **Learnings for future iterations:**
+  - `commit_changes` returns `None` if content is unchanged — idempotent re-runs may not produce a new commit
+  - Clippy requires `#[derive(Default)]` with `#[default]` on variant instead of manual `impl Default` for enums
+  - serde_yaml v0.9 added as dependency to engram-ingest for writing onboarding YAML files
+  - The `run_onboarding` function is async (for future embedding support) but current internals are sync
+  - `Store.path` is public but `Store.repo` is private — open `Repository` separately via `Repository::open(store_path)`
+---
+
+## 2026-03-10 - US-060
+- Implemented engram_onboard MCP tool with optional `repo` and `depth` parameters
+- Tool definition added to `onboarding_tool_definitions()` in tools.rs
+- Handler resolves repo path from `EngineState.source_roots`, parses depth enum, builds `SourceConfig`, and calls `engram_ingest::run_onboarding()`
+- Returns JSON with full `OnboardingReport` fields (depth, metadata_detected, commands_extracted, architecture_analyzed, abstractions_extracted, files_written, commit_hash)
+- Added engram-ingest as dependency of engram-mcp
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - `onboarding_tool_definitions()` follows the same pattern as `knowledge_tool_definitions()` — a separate function merged via `tools.extend()` in `handle_tools_list`
+  - When adding tools, update the existing `test_tools_list_returns_phase1_tools` test count assertion (currently 9)
+  - Source roots resolution: first entry is used as default when no `repo` param is provided
+  - `SourceConfig` needs `name`, `path`, `include`, `exclude` — use empty vecs for include/exclude to get default behavior
+---
+
+## 2026-03-10 - US-061
+- Implemented `engram_assess_context` MCP tool — a reflection tool that lets agents self-evaluate their gathered context
+- Added `SearchEvent` struct and `SessionTracker` (using `Mutex<Vec<SearchEvent>>` for interior mutability) to track session search history in-memory
+- Added `session: SessionTracker` field to `EngineState`, initialized in all McpServer constructors
+- Modified `handle_engram_search` to record a `SearchEvent` after each search
+- Handler returns: session_summary (search_count, unique_queries, scope_distribution, total_code_results, total_knowledge_results, total_search_time_ms), searches array, and evaluation_prompt
+- Optional `task_description` parameter frames the evaluation question
+- Added `assessment_tool_definitions()` in tools.rs, imported and merged in `handle_tools_list`
+- Tool count updated from 9 to 10 in `test_tools_list_returns_phase1_tools`
+- 7 new tests: no_engine error, empty session, after searches, task_description, duplicate queries, scope distribution, tools listing
+- Files changed: crates/engram-mcp/src/server.rs, crates/engram-mcp/src/tools.rs
+- **Learnings for future iterations:**
+  - Interior mutability via `std::sync::Mutex` is needed for session state since `handle_tools_call` takes `&EngineState` (immutable ref)
+  - Multi-request tests work by sending newline-delimited JSON-RPC requests through the same server instance
+  - The `run_server_with_engine` test helper processes all requests sequentially through one McpServer, so session state accumulates across requests
+---
