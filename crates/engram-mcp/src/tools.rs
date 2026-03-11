@@ -59,6 +59,46 @@ pub fn phase1_tool_definitions() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Returns tool definitions for knowledge recording MCP tools.
+pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_record_decision",
+        "description": "Record an architectural or design decision to the knowledge base. Auto-generates id, contributed_by, and created_at. Writes YAML, embeds it, and commits to the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the decision"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Background context explaining why the decision is needed"
+                },
+                "decision": {
+                    "type": "string",
+                    "description": "The decision that was made"
+                },
+                "consequences": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of consequences of this decision"
+                },
+                "related_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of related file paths"
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Decision status (default: 'accepted')"
+                }
+            },
+            "required": ["title", "context", "decision"]
+        }
+    })]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +160,34 @@ mod tests {
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"].as_str().unwrap(), "object");
         }
+    }
+
+    #[test]
+    fn test_knowledge_tool_definitions_has_record_decision() {
+        let tools = knowledge_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_record_decision");
+    }
+
+    #[test]
+    fn test_record_decision_has_required_params() {
+        let tools = knowledge_tool_definitions();
+        let decision_tool = &tools[0];
+        let required = decision_tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"title"));
+        assert!(required_names.contains(&"context"));
+        assert!(required_names.contains(&"decision"));
+        assert_eq!(required_names.len(), 3);
+    }
+
+    #[test]
+    fn test_record_decision_has_optional_params() {
+        let tools = knowledge_tool_definitions();
+        let decision_tool = &tools[0];
+        let props = decision_tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("consequences"));
+        assert!(props.contains_key("related_files"));
+        assert!(props.contains_key("status"));
     }
 }

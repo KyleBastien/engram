@@ -5,11 +5,11 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, EmbeddingProvider};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::phase1_tool_definitions;
+use crate::tools::{knowledge_tool_definitions, phase1_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -174,10 +174,12 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
 }
 
 fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
+    let mut tools = phase1_tool_definitions();
+    tools.extend(knowledge_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
-            "tools": phase1_tool_definitions()
+            "tools": tools
         }),
     )
 }
@@ -196,6 +198,7 @@ async fn handle_tools_call(
         "engram_search" => handle_engram_search(request, state).await,
         "engram_lookup" => handle_engram_lookup(request, state).await,
         "engram_status" => handle_engram_status(request, state).await,
+        "engram_record_decision" => handle_engram_record_decision(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -446,6 +449,148 @@ async fn handle_engram_status(
         "boot_time_ms": state.boot_time_ms,
         "embedding_provider": state.provider.name(),
         "store_path": state.store_path,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
+async fn handle_engram_record_decision(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    if state.store_path.is_empty() {
+        return tool_error_response(request, "Store path not configured");
+    }
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    let title = match args.and_then(|a| a.get("title")).and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => return tool_error_response(request, "title parameter is required"),
+    };
+
+    let context = match args.and_then(|a| a.get("context")).and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => return tool_error_response(request, "context parameter is required"),
+    };
+
+    let decision_text = match args.and_then(|a| a.get("decision")).and_then(|v| v.as_str()) {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => return tool_error_response(request, "decision parameter is required"),
+    };
+
+    let consequences: Vec<String> = args
+        .and_then(|a| a.get("consequences"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let related_files: Vec<String> = args
+        .and_then(|a| a.get("related_files"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let status = args
+        .and_then(|a| a.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("accepted")
+        .to_string();
+
+    let decision_id = format!("DEC-{}", uuid::Uuid::new_v4().as_simple());
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let decision = Decision {
+        id: decision_id.clone(),
+        title,
+        status,
+        context,
+        decision: decision_text,
+        consequences,
+        related_files,
+        contributed_by: "mcp-agent".to_string(),
+        created_at,
+        embedding_ref: None,
+    };
+
+    // Get embed text and embed it
+    let embed_text = engram_store::decision_embed_text(&decision);
+    let embedding = match state.provider.embed(&[&embed_text]).await {
+        Ok(mut vecs) if !vecs.is_empty() => vecs.remove(0),
+        Ok(_) => return tool_error_response(request, "Embedding returned empty result"),
+        Err(e) => return tool_error_response(request, &format!("Embedding failed: {e}")),
+    };
+
+    let store_path = std::path::Path::new(&state.store_path);
+    let dimensions = state.provider.dimensions();
+
+    // Write decision with embedding
+    let yaml_path = match engram_store::write_decision_with_embedding(
+        store_path,
+        &decision,
+        &embedding,
+        dimensions,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to write decision: {e}"))
+        }
+    };
+
+    let rel_path = yaml_path
+        .strip_prefix(store_path)
+        .unwrap_or(&yaml_path)
+        .to_string_lossy()
+        .to_string();
+
+    // Commit to git
+    let committed = match git2::Repository::open(store_path) {
+        Ok(repo) => {
+            match engram_store::commit_changes(&repo, &format!("knowledge: record decision {decision_id}")) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return tool_error_response(
+                        request,
+                        &format!("Failed to commit: {e}"),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to open repository: {e}"))
+        }
+    };
+
+    let response_data = json!({
+        "id": decision_id,
+        "path": rel_path,
+        "committed": committed,
     });
 
     JsonRpcResponse::success(
@@ -721,11 +866,12 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
         assert!(names.contains(&"engram_status"));
+        assert!(names.contains(&"engram_record_decision"));
     }
 
     #[tokio::test]
@@ -1445,6 +1591,283 @@ mod tests {
         let responses = run_server_with_engine(&input).await;
         let result = responses[0].result.as_ref().unwrap();
         assert_eq!(result["isError"], false);
+    }
+
+    // --- engram_record_decision tool tests ---
+
+    fn build_test_engine_with_store() -> (HybridSearch, Box<dyn EmbeddingProvider>, tempfile::TempDir)
+    {
+        let (search, provider) = build_test_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path();
+
+        // Initialize a git repo at the store path
+        let repo = git2::Repository::init(store_path).unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+            let sig = git2::Signature::now("test", "test@test").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+        }
+
+        // Create knowledge directories
+        std::fs::create_dir_all(store_path.join("knowledge/decisions")).unwrap();
+
+        (search, provider, tmp)
+    }
+
+    async fn run_server_with_store(
+        input: &str,
+        store_path: &str,
+    ) -> Vec<JsonRpcResponse> {
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+        server.set_boot_info(0, store_path.to_string(), "none".to_string());
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Test",
+                    "context": "Test context",
+                    "decision": "Test decision"
+                }
+            })),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_missing_title_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "context": "Test context",
+                    "decision": "Test decision"
+                }
+            })),
+        );
+        let responses =
+            run_server_with_store(&input, tmp.path().to_str().unwrap()).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("title"));
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_missing_context_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Test",
+                    "decision": "Test decision"
+                }
+            })),
+        );
+        let responses =
+            run_server_with_store(&input, tmp.path().to_str().unwrap()).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("context"));
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_missing_decision_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Test",
+                    "context": "Test context"
+                }
+            })),
+        );
+        let responses =
+            run_server_with_store(&input, tmp.path().to_str().unwrap()).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("decision"));
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_writes_and_commits() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Use PostgreSQL",
+                    "context": "Need a relational database",
+                    "decision": "Use PostgreSQL for persistence"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["id"].as_str().unwrap().starts_with("DEC-"));
+        assert!(data["path"].as_str().unwrap().contains("knowledge/decisions/"));
+        assert_eq!(data["committed"], true);
+
+        // Verify the YAML file exists on disk
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        assert!(yaml_path.exists());
+
+        // Verify the decision was committed to git
+        let repo = git2::Repository::open(tmp.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let msg = head.message().unwrap();
+        assert!(msg.contains("knowledge: record decision"));
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_with_optional_params() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Use HNSW",
+                    "context": "Need vector search",
+                    "decision": "Use HNSW for ANN",
+                    "consequences": ["Fast queries", "More memory"],
+                    "related_files": ["src/index.rs"],
+                    "status": "proposed"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        let content = std::fs::read_to_string(yaml_path).unwrap();
+        let decision: engram_core::Decision = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(decision.status, "proposed");
+        assert_eq!(decision.consequences, vec!["Fast queries", "More memory"]);
+        assert_eq!(decision.related_files, vec!["src/index.rs"]);
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_default_status_is_accepted() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Default status test",
+                    "context": "Testing defaults",
+                    "decision": "Should default to accepted"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        let content = std::fs::read_to_string(yaml_path).unwrap();
+        let decision: engram_core::Decision = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(decision.status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_auto_generates_fields() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "Auto fields test",
+                    "context": "Testing auto generation",
+                    "decision": "Fields should be auto-generated"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        let content = std::fs::read_to_string(yaml_path).unwrap();
+        let decision: engram_core::Decision = serde_yaml::from_str(&content).unwrap();
+
+        assert!(decision.id.starts_with("DEC-"));
+        assert_eq!(decision.contributed_by, "mcp-agent");
+        assert!(!decision.created_at.is_empty());
+        // embedding_ref should be set after write_decision_with_embedding
+        assert!(decision.embedding_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_record_decision_returns_json_format() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_decision",
+                "arguments": {
+                    "title": "JSON format test",
+                    "context": "Testing response format",
+                    "decision": "Response should have id, path, committed"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+
+        // Verify all required response fields exist
+        assert!(data["id"].is_string());
+        assert!(data["path"].is_string());
+        assert!(data["committed"].is_boolean());
     }
 
     #[tokio::test]
