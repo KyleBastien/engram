@@ -8,7 +8,7 @@ use engram_store::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{Bm25Document, Bm25Index, ChunkEntry, HnswIndex, HybridSearch, MetadataIndex};
+use crate::{Bm25Document, Bm25Index, ChunkEntry, HnswIndex, HybridSearch, MetadataIndex, SymbolGraph};
 
 /// The live in-memory index manager holding HNSW, BM25, and metadata indexes.
 ///
@@ -18,6 +18,8 @@ pub struct IndexManager {
     hnsw: HnswIndex,
     bm25: Bm25Index,
     metadata: MetadataIndex,
+    /// Cross-repo symbol dependency graph.
+    graph: SymbolGraph,
     /// Ordered chunks matching HNSW/BM25 key order (key = index position).
     chunks: Vec<ChunkMetadata>,
     /// Knowledge items loaded into the HNSW at KNOWLEDGE_KEY_OFFSET.
@@ -62,6 +64,10 @@ impl IndexManager {
         {
             let metadata = MetadataIndex::build(&chunks);
 
+            // Load graph from cache, fall back to building from store
+            let graph = try_load_graph_cache(&cache_dir)
+                .unwrap_or_else(|| SymbolGraph::build_from_store(store_root).unwrap_or_default());
+
             // On cache hit, also load knowledge embeddings (not cached)
             let (kn_chunks, kn_vectors) = load_knowledge_vectors(store_root, dimensions)?;
             if !kn_chunks.is_empty() {
@@ -81,6 +87,7 @@ impl IndexManager {
                 hnsw,
                 bm25,
                 metadata,
+                graph,
                 chunks,
                 knowledge_chunks: kn_chunks,
                 boot_time_ms: elapsed.as_millis() as u64,
@@ -161,6 +168,9 @@ impl IndexManager {
         // 8. Build metadata index (code chunks only for MetadataIndex)
         let metadata = MetadataIndex::build(&all_chunks);
 
+        // 8a. Build cross-repo symbol graph from _xrefs JSONL files
+        let graph = SymbolGraph::build_from_store(store_root).unwrap_or_default();
+
         // 9. Write compiled cache for next boot (code chunks only)
         write_cache(
             &cache_dir,
@@ -170,6 +180,8 @@ impl IndexManager {
             dimensions,
             &manifest_hash,
         )?;
+        // Write graph cache alongside other cache files
+        let _ = graph.save(&cache_dir.join("graph.json"));
 
         // 10. Report timing
         let chunk_count = all_chunks.len();
@@ -195,6 +207,7 @@ impl IndexManager {
             hnsw,
             bm25,
             metadata,
+            graph,
             chunks: all_chunks,
             knowledge_chunks,
             boot_time_ms: elapsed.as_millis() as u64,
@@ -215,6 +228,11 @@ impl IndexManager {
     /// Access the metadata lookup index.
     pub fn metadata(&self) -> &MetadataIndex {
         &self.metadata
+    }
+
+    /// Access the cross-repo symbol graph.
+    pub fn graph(&self) -> &SymbolGraph {
+        &self.graph
     }
 
     /// Returns the total number of indexed chunks.
@@ -448,6 +466,10 @@ fn load_knowledge_vectors(
 }
 
 // --- Inline cache functions (engram-cache depends on engram-query, so we inline to avoid cycles) ---
+
+fn try_load_graph_cache(cache_dir: &Path) -> Option<SymbolGraph> {
+    SymbolGraph::load(&cache_dir.join("graph.json")).ok()
+}
 
 fn try_load_cache(
     cache_dir: &Path,

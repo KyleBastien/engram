@@ -72,6 +72,9 @@ Started: 03/09/2026 17:15:47
 - chunk_id on ExportedSymbol follows format `{file}#{name}#{kind}` (same `#` separator as pipeline chunk_ids)
 - When adding optional fields to shared types (e.g. ExportedSymbol.chunk_id), use `#[serde(default)]` + `Option<T>` for backward compat
 - Python export extraction: if `__all__` is present, it takes precedence over top-level defs; private names (starting with `_`) are excluded
+- SymbolGraph in engram-query/src/graph.rs: build from exports+imports, traverse(name, Direction, depth), save/load JSON cache
+- Graph cache: `graph.json` in `.engram-cache/`; best-effort write (silent failure), load falls back to rebuild from store
+- Clippy enforces `Entry::Vacant` pattern over `contains_key` + `insert` on HashMap (map_entry lint)
 
 ---
 
@@ -1167,4 +1170,25 @@ Started: 03/09/2026 17:15:47
   - Rust use_declaration text is parsed with a custom `parse_rust_use_path()` function handling simple, tree, glob, and alias forms
   - Python import_from_statement has "module_name" field; names come after the "import" keyword node
   - Clippy enforces `['/', '.', ':']` array syntax over `|c: char| c == '/' || ...` closures (manual_pattern_char_comparison lint)
+---
+
+## 2026-03-10 - US-069
+- Implemented SymbolGraph in engram-query/src/graph.rs for cross-repo symbol dependency tracking
+- Graph builds from _xrefs/exports.jsonl and _xrefs/imports.jsonl during IndexManager::boot
+- Nodes represent exported symbols and import sites; edges represent import relationships
+- Edges labeled "cross_repo_import" when importing_repo != source_repo, "import" otherwise
+- Supports bidirectional traversal: callees (outgoing), callers (incoming), both
+- Depth-limited BFS traversal via traverse(symbol, direction, depth) -> TraversalResult
+- Graph serialized to graph.json in .engram-cache/ for fast boot (loaded on cache hit, rebuilt on miss)
+- Exported types: SymbolGraph, GraphNode, Direction, TraversalResult, TraversalEdge
+- 12 unit tests covering: empty graph, export-only nodes, edge creation, cross-repo labeling, same-repo labeling, depth-limited traversal, bidirectional traversal, save/load round trip, build from store JSONL, default, nonexistent symbol
+- All 79 engram-query tests pass, clippy workspace clean
+- Files changed: crates/engram-query/src/graph.rs (new), crates/engram-query/src/lib.rs, crates/engram-query/src/boot.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - JSONL reading for xrefs is inlined in graph.rs to avoid adding engram-ingest as dependency (would pull in tree-sitter)
+  - Graph uses HashMap<String, usize> node_index for O(1) dedup; nodes stored in Vec for index-based edge references
+  - Clippy enforces `Entry::Vacant` pattern over `contains_key` + `insert` (map_entry lint)
+  - Clippy enforces `#[derive(Default)]` over manual `impl Default` when all fields have Default (derivable_impls lint)
+  - IndexManager.graph field is built alongside metadata; accessed via graph() accessor
+  - Graph cache is best-effort: write failure silently ignored (let _ = graph.save()), load failure falls back to rebuild from store
 ---
