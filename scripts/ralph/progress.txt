@@ -62,7 +62,7 @@ Started: 03/09/2026 17:15:47
 - serde_yaml v0.9 is also a dependency of engram-ingest (for onboarding YAML file writing)
 - `Store.path` is public but `Store.repo` is private — use `Repository::open(store_path)` to get a repo handle
 - `commit_changes` returns `Ok(None)` when there are no changes — handle gracefully in idempotent pipelines
-- engram-mcp depends on engram-ingest for onboarding; tool count in `test_tools_list_returns_phase1_tools` must be updated when adding tools (currently 10)
+- engram-mcp depends on engram-ingest for onboarding; tool count in `test_tools_list_returns_phase1_tools` must be updated when adding tools (currently 11)
 - EngineState has a `session: SessionTracker` field (Mutex<Vec<SearchEvent>>) for in-memory session tracking; use interior mutability since handlers get `&EngineState`
 - New tool category functions (e.g., `assessment_tool_definitions()`) must be imported in server.rs and merged in `handle_tools_list` via `tools.extend()`
 
@@ -1045,4 +1045,18 @@ Started: 03/09/2026 17:15:47
   - Interior mutability via `std::sync::Mutex` is needed for session state since `handle_tools_call` takes `&EngineState` (immutable ref)
   - Multi-request tests work by sending newline-delimited JSON-RPC requests through the same server instance
   - The `run_server_with_engine` test helper processes all requests sequentially through one McpServer, so session state accumulates across requests
+---
+
+## 2026-03-10 - US-062
+- Implemented `engram_check_staleness` MCP tool for assessing freshness of retrieved context
+- Extended `SessionTracker` with `RetrievedChunk` struct and `retrieved_chunks` tracking (Mutex<Vec<RetrievedChunk>>)
+- Added chunk recording in `handle_engram_search` (both code/doc and knowledge results) and `handle_engram_lookup`
+- Handler groups chunks by file, computes stale/fresh counts, and returns structured evaluation prompt
+- Tool definition added to `assessment_tool_definitions()` (now 2 tools), total tool count now 11
+- Files changed: crates/engram-mcp/src/server.rs, crates/engram-mcp/src/tools.rs, tasks/prd.json, scripts/ralph/progress.txt
+- **Learnings for future iterations:**
+  - SessionTracker uses separate Mutex fields for different tracking concerns (events vs chunks) — add new Mutex<Vec<T>> fields for new tracking needs
+  - Clippy dead-code lint catches unused struct fields even if derived traits use them — only include fields actually read in handler logic
+  - RetrievedChunk deliberately omits `repo` and `kind` to avoid clippy dead-code warnings — only store what the handler needs
+  - `assessment_tool_definitions()` returns both `engram_assess_context` and `engram_check_staleness` — use find() in tests to locate specific tools
 ---

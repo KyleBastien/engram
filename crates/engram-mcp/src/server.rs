@@ -27,16 +27,27 @@ struct SearchEvent {
     timestamp: String,
 }
 
+/// Records a chunk retrieved during the session for staleness tracking.
+#[derive(Debug, Clone)]
+struct RetrievedChunk {
+    chunk_id: String,
+    file: String,
+    stale: bool,
+    indexed_at: String,
+}
+
 /// Thread-safe session tracker for accumulating search history.
 #[derive(Debug, Default)]
 struct SessionTracker {
     events: Mutex<Vec<SearchEvent>>,
+    retrieved_chunks: Mutex<Vec<RetrievedChunk>>,
 }
 
 impl SessionTracker {
     fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            retrieved_chunks: Mutex::new(Vec::new()),
         }
     }
 
@@ -46,10 +57,23 @@ impl SessionTracker {
         }
     }
 
+    fn record_chunks(&self, chunks: Vec<RetrievedChunk>) {
+        if let Ok(mut retrieved) = self.retrieved_chunks.lock() {
+            retrieved.extend(chunks);
+        }
+    }
+
     fn snapshot(&self) -> Vec<SearchEvent> {
         self.events
             .lock()
             .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+
+    fn retrieved_chunks_snapshot(&self) -> Vec<RetrievedChunk> {
+        self.retrieved_chunks
+            .lock()
+            .map(|chunks| chunks.clone())
             .unwrap_or_default()
     }
 }
@@ -250,6 +274,7 @@ async fn handle_tools_call(
         "engram_snapshot" => handle_engram_snapshot(request, state).await,
         "engram_onboard" => handle_engram_onboard(request, state).await,
         "engram_assess_context" => handle_engram_assess_context(request, state).await,
+        "engram_check_staleness" => handle_engram_check_staleness(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -387,6 +412,24 @@ async fn handle_engram_search(
         search_time_ms,
         timestamp: chrono::Utc::now().to_rfc3339(),
     });
+
+    // Record retrieved chunks for staleness tracking
+    let mut retrieved: Vec<RetrievedChunk> = code_doc_results
+        .iter()
+        .map(|r| RetrievedChunk {
+            chunk_id: r.chunk_id.clone(),
+            file: r.file.clone(),
+            stale: r.stale,
+            indexed_at: r.indexed_at.clone(),
+        })
+        .collect();
+    retrieved.extend(knowledge_results.iter().map(|r| RetrievedChunk {
+        chunk_id: r.chunk_id.clone(),
+        file: r.file.clone(),
+        stale: r.stale,
+        indexed_at: r.indexed_at.clone(),
+    }));
+    state.session.record_chunks(retrieved);
 
     // Format code/doc results
     let formatted_code: Vec<serde_json::Value> = code_doc_results
@@ -537,6 +580,18 @@ async fn handle_engram_lookup(
             obj
         })
         .collect();
+
+    // Record retrieved chunks for staleness tracking
+    let retrieved: Vec<RetrievedChunk> = entries
+        .iter()
+        .map(|entry| RetrievedChunk {
+            chunk_id: entry.chunk_id.clone(),
+            file: entry.file.clone(),
+            stale: entry.stale,
+            indexed_at: entry.indexed_at.clone(),
+        })
+        .collect();
+    state.session.record_chunks(retrieved);
 
     let response_data = json!({
         "results": formatted,
@@ -1434,6 +1489,154 @@ async fn handle_engram_assess_context(
     )
 }
 
+async fn handle_engram_check_staleness(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let chunks = state.session.retrieved_chunks_snapshot();
+
+    if chunks.is_empty() {
+        let response_data = json!({
+            "total_retrieved": 0,
+            "stale_count": 0,
+            "fresh_count": 0,
+            "files": [],
+            "evaluation_prompt": "## Staleness Check\n\nNo chunks have been retrieved in this session yet. \
+                Perform a search first, then call engram_check_staleness to verify freshness."
+        });
+
+        return JsonRpcResponse::success(
+            request.id.clone(),
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": response_data.to_string()
+                }],
+                "isError": false
+            }),
+        );
+    }
+
+    // Group chunks by file and compute per-file staleness
+    let mut file_map: HashMap<String, Vec<&RetrievedChunk>> = HashMap::new();
+    for chunk in &chunks {
+        file_map
+            .entry(if chunk.file.is_empty() {
+                chunk.chunk_id.clone()
+            } else {
+                chunk.file.clone()
+            })
+            .or_default()
+            .push(chunk);
+    }
+
+    let stale_count = chunks.iter().filter(|c| c.stale).count();
+    let fresh_count = chunks.len() - stale_count;
+
+    // Build per-file summary
+    let mut file_summaries: Vec<serde_json::Value> = file_map
+        .iter()
+        .map(|(file, file_chunks)| {
+            let stale_in_file = file_chunks.iter().filter(|c| c.stale).count();
+            let chunk_ids: Vec<&str> = file_chunks.iter().map(|c| c.chunk_id.as_str()).collect();
+            let latest_indexed = file_chunks
+                .iter()
+                .filter(|c| !c.indexed_at.is_empty())
+                .map(|c| c.indexed_at.as_str())
+                .max()
+                .unwrap_or("unknown");
+
+            json!({
+                "file": file,
+                "total_chunks": file_chunks.len(),
+                "stale_chunks": stale_in_file,
+                "chunk_ids": chunk_ids,
+                "latest_indexed_at": latest_indexed,
+            })
+        })
+        .collect();
+    file_summaries.sort_by(|a, b| {
+        b["stale_chunks"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["stale_chunks"].as_u64().unwrap_or(0))
+    });
+
+    // Deduplicate chunk IDs for total unique count
+    let mut seen_ids: Vec<String> = Vec::new();
+    for chunk in &chunks {
+        if !seen_ids.contains(&chunk.chunk_id) {
+            seen_ids.push(chunk.chunk_id.clone());
+        }
+    }
+
+    let stale_pct = if chunks.is_empty() {
+        0.0
+    } else {
+        (stale_count as f64 / chunks.len() as f64) * 100.0
+    };
+
+    let stale_files: Vec<&str> = file_summaries
+        .iter()
+        .filter(|f| f["stale_chunks"].as_u64().unwrap_or(0) > 0)
+        .filter_map(|f| f["file"].as_str())
+        .collect();
+
+    let evaluation_prompt = format!(
+        "## Staleness Check\n\n\
+         Retrieved {total} chunks ({unique} unique) across {file_count} files.\n\
+         - Fresh: {fresh_count} ({fresh_pct:.0}%)\n\
+         - Stale: {stale_count} ({stale_pct:.0}%)\n\n\
+         {stale_detail}\
+         ### Decision\n\
+         Consider the following before proceeding:\n\
+         1. Are the stale chunks in critical files for your current task?\n\
+         2. Could the staleness reflect minor formatting changes, or substantive logic changes?\n\
+         3. Would re-indexing (via a new ingest) resolve the staleness before you proceed?\n\
+         4. Is it safe to proceed with stale context, noting that some information may be outdated?\n\n\
+         If staleness is in non-critical files or unlikely to affect correctness, proceed with caution. \
+         Otherwise, consider re-indexing or searching for updated context.",
+        total = chunks.len(),
+        unique = seen_ids.len(),
+        file_count = file_map.len(),
+        fresh_pct = 100.0 - stale_pct,
+        stale_detail = if stale_files.is_empty() {
+            "All retrieved chunks are fresh.\n\n".to_string()
+        } else {
+            format!(
+                "Stale files: {}\n\n",
+                stale_files.join(", ")
+            )
+        },
+    );
+
+    let response_data = json!({
+        "total_retrieved": chunks.len(),
+        "unique_chunks": seen_ids.len(),
+        "stale_count": stale_count,
+        "fresh_count": fresh_count,
+        "stale_percentage": (stale_pct * 10.0).round() / 10.0,
+        "files": file_summaries,
+        "evaluation_prompt": evaluation_prompt,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -1786,7 +1989,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -1798,6 +2001,7 @@ mod tests {
         assert!(names.contains(&"engram_snapshot"));
         assert!(names.contains(&"engram_onboard"));
         assert!(names.contains(&"engram_assess_context"));
+        assert!(names.contains(&"engram_check_staleness"));
     }
 
     #[tokio::test]
@@ -3925,5 +4129,131 @@ mod tests {
             .unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_assess_context"));
+    }
+
+    // --- engram_check_staleness tool tests ---
+
+    #[tokio::test]
+    async fn test_check_staleness_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_check_staleness", "arguments": {}})),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_check_staleness_no_searches_returns_empty() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_check_staleness", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["total_retrieved"], 0);
+        assert_eq!(data["stale_count"], 0);
+        assert_eq!(data["fresh_count"], 0);
+        assert!(data["evaluation_prompt"].as_str().unwrap().contains("No chunks"));
+    }
+
+    #[tokio::test]
+    async fn test_check_staleness_after_search_returns_chunks() {
+        let search = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate"}})),
+        );
+        let staleness = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_check_staleness", "arguments": {}})),
+        );
+        let input = format!("{search}\n{staleness}");
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 2);
+
+        let data = parse_tool_text(&responses[1]);
+        assert!(data["total_retrieved"].as_u64().unwrap() > 0);
+        assert!(data["files"].as_array().unwrap().len() > 0);
+        assert!(data["evaluation_prompt"].as_str().unwrap().contains("Staleness Check"));
+        assert!(data["stale_percentage"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_check_staleness_reports_fresh_chunks() {
+        // Default test engine has stale=false on all chunks
+        let search = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate"}})),
+        );
+        let staleness = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_check_staleness", "arguments": {}})),
+        );
+        let input = format!("{search}\n{staleness}");
+        let responses = run_server_with_engine(&input).await;
+
+        let data = parse_tool_text(&responses[1]);
+        assert_eq!(data["stale_count"], 0);
+        assert!(data["fresh_count"].as_u64().unwrap() > 0);
+        assert!(data["evaluation_prompt"].as_str().unwrap().contains("All retrieved chunks are fresh"));
+    }
+
+    #[tokio::test]
+    async fn test_check_staleness_listed_in_tools() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server(&input).await;
+        let tools = responses[0].result.as_ref().unwrap()["tools"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_check_staleness"));
+    }
+
+    #[tokio::test]
+    async fn test_check_staleness_file_grouping() {
+        // Two searches should accumulate chunks, grouped by file
+        let search1 = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate"}})),
+        );
+        let search2 = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "config"}})),
+        );
+        let staleness = make_request(
+            3,
+            "tools/call",
+            Some(json!({"name": "engram_check_staleness", "arguments": {}})),
+        );
+        let input = format!("{search1}\n{search2}\n{staleness}");
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 3);
+
+        let data = parse_tool_text(&responses[2]);
+        let files = data["files"].as_array().unwrap();
+        // Each file entry should have the required fields
+        for f in files {
+            assert!(f["file"].is_string());
+            assert!(f["total_chunks"].is_number());
+            assert!(f["stale_chunks"].is_number());
+            assert!(f["chunk_ids"].is_array());
+            assert!(f["latest_indexed_at"].is_string());
+        }
     }
 }

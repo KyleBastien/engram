@@ -243,6 +243,14 @@ pub fn assessment_tool_definitions() -> Vec<serde_json::Value> {
                 }
             }
         }
+    }),
+    json!({
+        "name": "engram_check_staleness",
+        "description": "Check whether chunks retrieved so far in this session are still current. Returns staleness info for all retrieved chunks grouped by file, along with a structured prompt asking whether stale context is acceptable for the task at hand. Does NOT perform any search — it is a reflection tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     })]
 }
 
@@ -454,8 +462,10 @@ mod tests {
     #[test]
     fn test_assessment_tool_definitions_count() {
         let tools = assessment_tool_definitions();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_assess_context");
+        assert_eq!(tools.len(), 2);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_assess_context"));
+        assert!(names.contains(&"engram_check_staleness"));
     }
 
     #[test]
@@ -472,5 +482,20 @@ mod tests {
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("task_description"));
         assert_eq!(props["task_description"]["type"].as_str().unwrap(), "string");
+    }
+
+    #[test]
+    fn test_check_staleness_has_no_required_params() {
+        let tools = assessment_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_check_staleness").unwrap();
+        assert!(tool["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_check_staleness_has_no_properties() {
+        let tools = assessment_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_check_staleness").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.is_empty());
     }
 }
