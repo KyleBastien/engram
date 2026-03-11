@@ -1625,3 +1625,18 @@ Started: 03/09/2026 17:15:47
   - index.html uses inline styles on nav links (not CSS classes) unlike health.html/knowledge.html which use nav a / nav a.active classes
   - DashboardState now has 3 data fields (health, knowledge, search_analytics) — all follow the Arc<RwLock<Snapshot>> pattern
 ---
+
+## 2026-03-10 - US-093
+- Built Benchmark Dashboard View with active sessions, historical runs, token savings trend chart, and per-task drill-down
+- Added BenchmarkSnapshot, BenchmarkRunSummary, TokenSavingsPoint types to lib.rs
+- Added GET /api/benchmarks REST endpoint and benchmarks_handler
+- Added benchmarks: Arc<RwLock<BenchmarkSnapshot>> to DashboardState (updated new() and with_knowledge())
+- Created benchmark.html with: active sessions table, summary stats, canvas savings chart, clickable historical runs table, detail panel
+- Added Benchmarks nav link to all 4 existing HTML views (index.html, health.html, knowledge.html, search.html)
+- Added 4 new tests: benchmark_snapshot_default_empty, benchmarks_api_returns_json, embedded_assets_contain_benchmark, benchmark_html_served (28 total tests pass)
+- Files changed: crates/engram-dashboard/src/lib.rs, crates/engram-dashboard/src/assets/benchmark.html (new), crates/engram-dashboard/src/assets/index.html, crates/engram-dashboard/src/assets/health.html, crates/engram-dashboard/src/assets/knowledge.html, crates/engram-dashboard/src/assets/search.html
+- **Learnings for future iterations:**
+  - DashboardState now has 4 data fields (health, knowledge, search_analytics, benchmarks) — all follow Arc<RwLock<Snapshot>> pattern
+  - index.html nav uses inline styles; health/knowledge/search/benchmark use CSS class-based nav — must update both styles when adding nav links
+  - Benchmark detail panel uses onclick with session_id to look up run data from the allRuns array stored in closure scope
+---
