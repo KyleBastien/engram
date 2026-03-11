@@ -5,6 +5,7 @@ mod knowledge;
 mod manifest;
 mod paths;
 mod snapshot;
+mod sync;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ pub use snapshot::{
     snapshot_embedding_path, write_snapshot, write_snapshot_embedding,
     write_snapshot_with_embedding, CompactReport, SnapshotEmbeddingInfo,
 };
+pub use sync::{sync_pull, sync_push, SyncDirection, SyncReport};
 
 /// A git-backed semantic store.
 pub struct Store {
