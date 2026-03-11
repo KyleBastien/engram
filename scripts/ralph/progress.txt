@@ -1565,3 +1565,25 @@ Started: 03/09/2026 17:15:47
   - axum WebSocket at /ws, dashboard HTML at /dashboard — keep these paths separate
   - Use IIFE pattern for vanilla JS to avoid polluting global scope
 ---
+
+## 2026-03-10 - US-090
+- Implemented Index Health View dashboard page with REST API endpoint
+- Added `stale_files()` method to HybridSearch for file-level staleness data
+- Created `HealthSnapshot`, `DashboardState`, and related types in engram-dashboard
+- Added `/api/health` REST endpoint serving JSON health data
+- Created `health.html` frontend page with auto-refresh (30s polling)
+- Updated CLI to build HealthSnapshot from engine data and pass to dashboard
+- Added navigation between Live Session and Index Health views
+- Files changed:
+  - crates/engram-query/src/hybrid.rs (stale_files method)
+  - crates/engram-dashboard/src/lib.rs (HealthSnapshot, DashboardState, REST API, tests)
+  - crates/engram-dashboard/src/assets/health.html (new - health view page)
+  - crates/engram-dashboard/src/assets/index.html (navigation links)
+  - crates/engram-cli/src/main.rs (health snapshot population)
+- **Learnings for future iterations:**
+  - Dashboard state needs shared access: use `Arc<RwLock<HealthSnapshot>>` for data that both MCP server and dashboard need
+  - `DashboardState` wraps both `EventBroadcaster` (WebSocket events) and health data (REST endpoints) — this pattern works well for adding more dashboard state
+  - Health data is snapshotted at boot time — for live updates, the shared `Arc<RwLock<>>` allows MCP server to push updates
+  - `build_router_with_events()` is now a thin wrapper around `build_router_with_state()` for backwards compat
+  - Cache size calculation walks `.engram-cache/` directory — a simple first-level read_dir sum
+---
