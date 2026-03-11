@@ -1192,3 +1192,23 @@ Started: 03/09/2026 17:15:47
   - IndexManager.graph field is built alongside metadata; accessed via graph() accessor
   - Graph cache is best-effort: write failure silently ignored (let _ = graph.save()), load failure falls back to rebuild from store
 ---
+
+## 2026-03-10 - US-070
+- Implemented `engram_graph` MCP tool for exploring cross-repo symbol dependency graphs
+- Added `graph_tool_definitions()` in tools.rs with `engram_graph` tool (required: symbol; optional: direction, depth)
+- Added `handle_engram_graph` handler in server.rs that delegates to `SymbolGraph::traverse()`
+- Direction parameter maps to `Direction` enum: "callers", "callees", "both" (default: "both"); depth defaults to 2
+- Returns JSON with nodes (chunk_id, name, file, repo, kind), edges (source, target, relationship), and counts
+- Cross-repo edges labeled "cross_repo_import", same-repo edges labeled "import"
+- Added `graph: SymbolGraph` field to `EngineState` with `set_graph()` setter on McpServer
+- Updated CLI serve command to pass graph from IndexManager to McpServer via `set_graph()`
+- Updated tool count in `test_tools_list_returns_phase1_tools` from 11 to 12
+- 9 new tests: no engine error, missing symbol, nonexistent symbol, default direction/depth, invalid direction, graph with data, response structure, listed in tools
+- All 157 engram-mcp tests pass, 685 workspace tests pass, clippy clean
+- Files changed: crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs, crates/engram-cli/src/main.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - New tool categories get their own `*_tool_definitions()` function in tools.rs, imported and merged in `handle_tools_list` via `tools.extend()`
+  - EngineState fields can be set post-construction via setter methods (set_boot_info, set_graph) for data not available at constructor time
+  - SymbolGraph is cloned from IndexManager before `into_hybrid_search()` consumes it
+  - Test helpers `run_server_with_engine` use `McpServer::with_engine()` which defaults graph to empty — for graph-specific tests, construct server manually and call `set_graph()`
+---

@@ -7,10 +7,10 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, OnboardingDepth, Partition, Pattern, Snapshot, SnapshotTier, SourceConfig};
-use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
+use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{assessment_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
+use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -92,6 +92,8 @@ pub struct EngineState {
     pub cache_status: String,
     /// In-memory session tracker for search history (used by engram_assess_context).
     session: SessionTracker,
+    /// Cross-repo symbol dependency graph (used by engram_graph).
+    pub graph: SymbolGraph,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -122,6 +124,7 @@ impl McpServer {
                 store_path: String::new(),
                 cache_status: "none".to_string(),
                 session: SessionTracker::new(),
+                graph: SymbolGraph::default(),
             }),
         }
     }
@@ -141,7 +144,15 @@ impl McpServer {
                 store_path: String::new(),
                 cache_status: "none".to_string(),
                 session: SessionTracker::new(),
+                graph: SymbolGraph::default(),
             }),
+        }
+    }
+
+    /// Set the cross-repo symbol graph on the engine state.
+    pub fn set_graph(&mut self, graph: SymbolGraph) {
+        if let Some(ref mut state) = self.state {
+            state.graph = graph;
         }
     }
 
@@ -245,6 +256,7 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     tools.extend(knowledge_tool_definitions());
     tools.extend(onboarding_tool_definitions());
     tools.extend(assessment_tool_definitions());
+    tools.extend(graph_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -275,6 +287,7 @@ async fn handle_tools_call(
         "engram_onboard" => handle_engram_onboard(request, state).await,
         "engram_assess_context" => handle_engram_assess_context(request, state).await,
         "engram_check_staleness" => handle_engram_check_staleness(request, state).await,
+        "engram_graph" => handle_engram_graph(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -1658,6 +1671,102 @@ async fn handle_engram_check_staleness(
     )
 }
 
+async fn handle_engram_graph(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let symbol = match args.get("symbol").and_then(|s| s.as_str()) {
+        Some(s) => s,
+        None => return tool_error_response(request, "Missing required parameter: symbol"),
+    };
+
+    let direction = match args.get("direction").and_then(|d| d.as_str()).unwrap_or("both") {
+        "callers" => Direction::Callers,
+        "callees" => Direction::Callees,
+        "both" => Direction::Both,
+        other => {
+            return tool_error_response(
+                request,
+                &format!("Invalid direction '{}': must be callers, callees, or both", other),
+            )
+        }
+    };
+
+    let depth = args
+        .get("depth")
+        .and_then(|d| d.as_u64())
+        .unwrap_or(2) as usize;
+
+    let result = state.graph.traverse(symbol, direction, depth);
+
+    let nodes: Vec<serde_json::Value> = result
+        .nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "chunk_id": n.chunk_id,
+                "name": n.name,
+                "file": n.file,
+                "repo": n.repo,
+                "kind": n.kind,
+            })
+        })
+        .collect();
+
+    let edges: Vec<serde_json::Value> = result
+        .edges
+        .iter()
+        .map(|e| {
+            json!({
+                "source": {
+                    "name": e.source.name,
+                    "file": e.source.file,
+                    "repo": e.source.repo,
+                },
+                "target": {
+                    "name": e.target.name,
+                    "file": e.target.file,
+                    "repo": e.target.repo,
+                },
+                "relationship": e.relationship,
+            })
+        })
+        .collect();
+
+    let response_data = json!({
+        "symbol": symbol,
+        "direction": args.get("direction").and_then(|d| d.as_str()).unwrap_or("both"),
+        "depth": depth,
+        "nodes": nodes,
+        "edges": edges,
+        "node_count": nodes.len(),
+        "edge_count": edges.len(),
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -2010,11 +2119,12 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
         assert!(names.contains(&"engram_status"));
+        assert!(names.contains(&"engram_graph"));
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
         assert!(names.contains(&"engram_record_pattern"));
@@ -4276,5 +4386,200 @@ mod tests {
             assert!(f["chunk_ids"].is_array());
             assert!(f["latest_indexed_at"].is_string());
         }
+    }
+
+    // --- engram_graph tests ---
+
+    #[tokio::test]
+    async fn test_graph_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "Foo"}})),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_graph_missing_symbol_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("symbol"));
+    }
+
+    #[tokio::test]
+    async fn test_graph_nonexistent_symbol_returns_empty() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "NonexistentSymbol"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["node_count"], 0);
+        assert_eq!(data["edge_count"], 0);
+        assert_eq!(data["symbol"], "NonexistentSymbol");
+    }
+
+    #[tokio::test]
+    async fn test_graph_default_direction_is_both() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "Foo"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["direction"], "both");
+    }
+
+    #[tokio::test]
+    async fn test_graph_default_depth_is_2() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "Foo"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["depth"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_graph_invalid_direction_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "Foo", "direction": "invalid"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_graph_with_graph_data() {
+        use engram_core::SymbolId;
+
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+
+        // Build a graph with actual data
+        let exports = vec![engram_core::ExportedSymbol {
+            id: SymbolId {
+                file: std::path::PathBuf::from("src/foo.ts"),
+                name: "Foo".to_string(),
+                kind: "class".to_string(),
+            },
+            line: 1,
+            is_public: true,
+            doc: None,
+            chunk_id: Some("repo-a#src/foo.ts#Foo".to_string()),
+        }];
+        let imports = vec![engram_core::ResolvedImport {
+            import_path: "import { Foo }".to_string(),
+            resolved_symbol: SymbolId {
+                file: std::path::PathBuf::from("src/foo.ts"),
+                name: "Foo".to_string(),
+                kind: "class".to_string(),
+            },
+            importing_file: std::path::PathBuf::from("src/main.ts"),
+            line: 1,
+            importing_repo: "repo-b".to_string(),
+            source_repo: "repo-a".to_string(),
+            source_file: std::path::PathBuf::from("src/foo.ts"),
+            resolved_chunk: Some("repo-a#src/foo.ts#Foo".to_string()),
+            resolution: "heuristic".to_string(),
+        }];
+        let graph = SymbolGraph::build(&exports, &imports);
+        server.set_graph(graph);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "Foo", "direction": "callers", "depth": 1}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["symbol"], "Foo");
+        assert_eq!(data["direction"], "callers");
+        assert_eq!(data["depth"], 1);
+
+        let nodes = data["nodes"].as_array().unwrap();
+        assert!(!nodes.is_empty(), "Should have nodes for Foo and its caller");
+
+        let edges = data["edges"].as_array().unwrap();
+        assert!(!edges.is_empty(), "Should have at least one edge");
+
+        // Check edge structure
+        let edge = &edges[0];
+        assert!(edge["source"].is_object());
+        assert!(edge["target"].is_object());
+        assert!(edge["relationship"].is_string());
+        assert_eq!(edge["relationship"], "cross_repo_import");
+
+        // Nodes should have required fields
+        for node in nodes {
+            assert!(node["name"].is_string());
+            assert!(node["file"].is_string());
+            assert!(node["repo"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_graph_response_json_structure() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_graph", "arguments": {"symbol": "anything"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        // All required fields should be present
+        assert!(data["symbol"].is_string());
+        assert!(data["direction"].is_string());
+        assert!(data["depth"].is_number());
+        assert!(data["nodes"].is_array());
+        assert!(data["edges"].is_array());
+        assert!(data["node_count"].is_number());
+        assert!(data["edge_count"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_graph_listed_in_tools() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_graph"));
     }
 }

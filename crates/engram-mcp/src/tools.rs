@@ -258,6 +258,33 @@ pub fn assessment_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for graph exploration MCP tools.
+pub fn graph_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_graph",
+        "description": "Explore dependency/reference graphs across repos. Traverses the cross-repo symbol graph to find callers, callees, or both directions from a given symbol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name to start traversal from"
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["callers", "callees", "both"],
+                    "description": "Traversal direction: callers (who depends on this), callees (what this depends on), both (default: both)"
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Maximum traversal depth (default: 2)"
+                }
+            },
+            "required": ["symbol"]
+        }
+    })]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +528,30 @@ mod tests {
         let tool = tools.iter().find(|t| t["name"] == "engram_check_staleness").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.is_empty());
+    }
+
+    #[test]
+    fn test_graph_tool_definitions_count() {
+        let tools = graph_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_graph");
+    }
+
+    #[test]
+    fn test_graph_has_required_symbol() {
+        let tools = graph_tool_definitions();
+        let tool = &tools[0];
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "symbol");
+    }
+
+    #[test]
+    fn test_graph_has_optional_params() {
+        let tools = graph_tool_definitions();
+        let tool = &tools[0];
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("direction"));
+        assert!(props.contains_key("depth"));
     }
 }

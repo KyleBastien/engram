@@ -215,10 +215,12 @@ async fn main() {
                 .map(|s| (s.name.clone(), PathBuf::from(&s.path)))
                 .collect();
 
+            let graph = index_manager.graph().clone();
             let search = index_manager.into_hybrid_search();
             let mut server =
                 McpServer::with_engine_and_sources(search, Box::new(provider), source_roots);
             server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status);
+            server.set_graph(graph);
 
             eprintln!("engram: serving on stdio (context: {context})");
 
