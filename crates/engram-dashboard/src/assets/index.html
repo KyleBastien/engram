@@ -13,37 +13,372 @@
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            align-items: center;
-            padding: 2rem;
+            padding: 1.5rem;
         }
-        h1 { font-size: 2rem; margin-bottom: 0.5rem; }
-        .subtitle { color: #94a3b8; margin-bottom: 2rem; }
-        .status {
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.5rem; }
+        header .subtitle { color: #94a3b8; font-size: 0.9rem; }
+        .ws-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        .ws-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+        .ws-dot.connected { background: #22c55e; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: auto 1fr;
+            gap: 1rem;
+            flex: 1;
+            min-height: 0;
+        }
+        .card {
             background: #1e293b;
             border: 1px solid #334155;
             border-radius: 8px;
-            padding: 1.5rem;
-            max-width: 600px;
-            width: 100%;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
         }
-        .status p { margin-bottom: 0.5rem; }
+        .card h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }
+        .card-body {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .query-stream { grid-column: 1 / -1; }
         .badge {
             display: inline-block;
-            background: #22c55e;
-            color: #0f172a;
             padding: 2px 8px;
             border-radius: 4px;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
             font-weight: 600;
         }
+        .badge-green { background: #22c55e; color: #0f172a; }
+        .badge-blue { background: #3b82f6; color: #fff; }
+        .badge-yellow { background: #eab308; color: #0f172a; }
+        .badge-gray { background: #475569; color: #e2e8f0; }
+
+        /* Connections table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th {
+            text-align: left;
+            color: #64748b;
+            font-weight: 500;
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid #334155;
+        }
+        td {
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid #1e293b;
+        }
+        .empty-state {
+            color: #64748b;
+            font-size: 0.85rem;
+            padding: 1rem 0;
+            text-align: center;
+        }
+
+        /* Query stream items */
+        .query-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #1e293b;
+            font-size: 0.85rem;
+        }
+        .query-item:last-child { border-bottom: none; }
+        .query-time {
+            color: #64748b;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            min-width: 55px;
+        }
+        .query-text {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .query-stats {
+            display: flex;
+            gap: 0.5rem;
+            white-space: nowrap;
+            font-size: 0.75rem;
+        }
+        .stat-code { color: #3b82f6; }
+        .stat-knowledge { color: #a78bfa; }
+        .stat-time { color: #64748b; }
+        .stat-hit { color: #22c55e; }
+        .stat-miss { color: #ef4444; }
+
+        /* Context/Mode panel */
+        .context-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.4rem 0;
+            font-size: 0.85rem;
+        }
+        .context-label { color: #64748b; }
     </style>
 </head>
 <body>
-    <h1>Engram Dashboard</h1>
-    <p class="subtitle">Semantic Context Engine</p>
-    <div class="status">
-        <p><span class="badge">RUNNING</span></p>
-        <p>Dashboard server is active. Views will be added in upcoming updates.</p>
+    <header>
+        <div>
+            <h1>Engram Dashboard</h1>
+            <span class="subtitle">Semantic Context Engine &mdash; Live Session</span>
+        </div>
+        <div class="ws-status">
+            <span class="ws-dot" id="ws-dot"></span>
+            <span id="ws-label">Disconnected</span>
+        </div>
+    </header>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Active Connections</h2>
+            <div class="card-body" id="connections-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Client</th>
+                            <th>Connected Since</th>
+                            <th>Requests</th>
+                        </tr>
+                    </thead>
+                    <tbody id="connections-table"></tbody>
+                </table>
+                <div class="empty-state" id="connections-empty">No active connections</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Context &amp; Modes</h2>
+            <div class="card-body" id="context-body">
+                <div class="context-item">
+                    <span class="context-label">Active Context</span>
+                    <span id="active-context"><span class="badge badge-gray">default</span></span>
+                </div>
+                <div class="context-item">
+                    <span class="context-label">Active Mode</span>
+                    <span id="active-mode"><span class="badge badge-gray">standard</span></span>
+                </div>
+                <div class="context-item">
+                    <span class="context-label">Total Sessions</span>
+                    <span id="total-sessions">0</span>
+                </div>
+                <div class="context-item">
+                    <span class="context-label">Total Queries</span>
+                    <span id="total-queries">0</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card query-stream">
+            <h2>Search Query Stream</h2>
+            <div class="card-body" id="query-stream"></div>
+        </div>
     </div>
+
+    <script>
+    (function() {
+        // State
+        var connections = {};
+        var totalQueries = 0;
+        var totalSessions = 0;
+
+        // DOM refs
+        var wsDot = document.getElementById('ws-dot');
+        var wsLabel = document.getElementById('ws-label');
+        var connTable = document.getElementById('connections-table');
+        var connEmpty = document.getElementById('connections-empty');
+        var queryStream = document.getElementById('query-stream');
+        var totalQueriesEl = document.getElementById('total-queries');
+        var totalSessionsEl = document.getElementById('total-sessions');
+        var activeContextEl = document.getElementById('active-context');
+        var activeModeEl = document.getElementById('active-mode');
+
+        function formatTime(date) {
+            var h = String(date.getHours()).padStart(2, '0');
+            var m = String(date.getMinutes()).padStart(2, '0');
+            var s = String(date.getSeconds()).padStart(2, '0');
+            return h + ':' + m + ':' + s;
+        }
+
+        function timeSince(date) {
+            var seconds = Math.floor((new Date() - date) / 1000);
+            if (seconds < 60) return seconds + 's ago';
+            var minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return minutes + 'm ago';
+            var hours = Math.floor(minutes / 60);
+            return hours + 'h ' + (minutes % 60) + 'm ago';
+        }
+
+        function renderConnections() {
+            var keys = Object.keys(connections);
+            if (keys.length === 0) {
+                connTable.innerHTML = '';
+                connEmpty.style.display = 'block';
+                return;
+            }
+            connEmpty.style.display = 'none';
+            var html = '';
+            for (var i = 0; i < keys.length; i++) {
+                var c = connections[keys[i]];
+                html += '<tr>'
+                    + '<td>' + escapeHtml(c.name) + '</td>'
+                    + '<td>' + formatTime(c.connectedAt) + ' (' + timeSince(c.connectedAt) + ')</td>'
+                    + '<td>' + c.requestCount + '</td>'
+                    + '</tr>';
+            }
+            connTable.innerHTML = html;
+        }
+
+        function addQueryItem(event) {
+            var item = document.createElement('div');
+            item.className = 'query-item';
+
+            var knowledgeHit = event.knowledge_result_count > 0;
+
+            item.innerHTML =
+                '<span class="query-time">' + formatTime(new Date()) + '</span>'
+                + '<span class="query-text">' + escapeHtml(event.query) + '</span>'
+                + '<span class="query-stats">'
+                + '<span class="stat-code">' + event.code_result_count + ' code</span>'
+                + '<span class="stat-knowledge">' + event.knowledge_result_count + ' kb</span>'
+                + '<span class="stat-time">' + event.search_time_ms + 'ms</span>'
+                + '<span class="' + (knowledgeHit ? 'stat-hit' : 'stat-miss') + '">'
+                + (knowledgeHit ? 'KB HIT' : 'KB MISS')
+                + '</span>'
+                + '</span>';
+
+            queryStream.appendChild(item);
+
+            // Auto-scroll to bottom
+            queryStream.scrollTop = queryStream.scrollHeight;
+
+            // Keep max 200 items
+            while (queryStream.children.length > 200) {
+                queryStream.removeChild(queryStream.firstChild);
+            }
+        }
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function handleEvent(event) {
+            switch (event.type) {
+                case 'session_connect':
+                    connections[event.client_name] = {
+                        name: event.client_name,
+                        connectedAt: new Date(),
+                        requestCount: 0
+                    };
+                    totalSessions++;
+                    totalSessionsEl.textContent = totalSessions;
+                    renderConnections();
+                    break;
+
+                case 'session_disconnect':
+                    delete connections[event.client_name];
+                    renderConnections();
+                    break;
+
+                case 'search_query':
+                    totalQueries++;
+                    totalQueriesEl.textContent = totalQueries;
+                    // Increment request count for all active connections
+                    var connKeys = Object.keys(connections);
+                    for (var i = 0; i < connKeys.length; i++) {
+                        connections[connKeys[i]].requestCount++;
+                    }
+                    renderConnections();
+                    addQueryItem(event);
+                    break;
+
+                case 'context_switch':
+                    if (event.context) {
+                        activeContextEl.innerHTML = '<span class="badge badge-blue">' + escapeHtml(event.context) + '</span>';
+                    }
+                    break;
+
+                case 'mode_switch':
+                    if (event.mode) {
+                        activeModeEl.innerHTML = '<span class="badge badge-yellow">' + escapeHtml(event.mode) + '</span>';
+                    }
+                    break;
+            }
+        }
+
+        // WebSocket connection with auto-reconnect
+        var ws = null;
+        var reconnectDelay = 1000;
+
+        function connect() {
+            var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var url = protocol + '//' + window.location.host + '/ws';
+            ws = new WebSocket(url);
+
+            ws.onopen = function() {
+                wsDot.classList.add('connected');
+                wsLabel.textContent = 'Connected';
+                reconnectDelay = 1000;
+            };
+
+            ws.onclose = function() {
+                wsDot.classList.remove('connected');
+                wsLabel.textContent = 'Reconnecting...';
+                setTimeout(connect, reconnectDelay);
+                reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+            };
+
+            ws.onerror = function() {
+                ws.close();
+            };
+
+            ws.onmessage = function(msg) {
+                try {
+                    var event = JSON.parse(msg.data);
+                    handleEvent(event);
+                } catch (e) {
+                    // Ignore malformed messages
+                }
+            };
+        }
+
+        // Periodically refresh "connected since" times
+        setInterval(renderConnections, 30000);
+
+        connect();
+    })();
+    </script>
 </body>
 </html>
