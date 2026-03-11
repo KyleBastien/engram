@@ -1,0 +1,26 @@
+{
+  "name": "engram-bench",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build -p engram-bench",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test -p engram-bench",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p engram-bench -- -D warnings",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

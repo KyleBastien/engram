@@ -9,4 +9,5 @@ members = [
     "crates/engram-cache",
     "crates/engram-cli",
     "crates/engram-providers/ollama",
+    "crates/engram-bench",
 ]
