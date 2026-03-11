@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Pattern};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Pattern, Snapshot, SnapshotTier};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
@@ -202,6 +202,7 @@ async fn handle_tools_call(
         "engram_record_lesson" => handle_engram_record_lesson(request, state).await,
         "engram_record_pattern" => handle_engram_record_pattern(request, state).await,
         "engram_record_glossary" => handle_engram_record_glossary(request, state).await,
+        "engram_snapshot" => handle_engram_snapshot(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -995,6 +996,129 @@ async fn handle_engram_record_glossary(
     )
 }
 
+async fn handle_engram_snapshot(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    if state.store_path.is_empty() {
+        return tool_error_response(request, "Store path not configured");
+    }
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    let session_id = match args.and_then(|a| a.get("session_id")).and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return tool_error_response(request, "session_id parameter is required"),
+    };
+
+    let summary = match args.and_then(|a| a.get("summary")).and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return tool_error_response(request, "summary parameter is required"),
+    };
+
+    let key_context: Vec<String> = match args.and_then(|a| a.get("key_context")).and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => return tool_error_response(request, "key_context parameter is required"),
+    };
+
+    let full_transcript = match args.and_then(|a| a.get("full_transcript")).and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return tool_error_response(request, "full_transcript parameter is required"),
+    };
+
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let snapshot = Snapshot {
+        session_id: session_id.clone(),
+        summary: summary.clone(),
+        key_context,
+        full_transcript,
+        created_at,
+        tier: SnapshotTier::Active,
+        embedding_ref: None,
+    };
+
+    // Embed summary + key_context for searchability
+    let embed_text = engram_store::snapshot_embed_text(&snapshot);
+    let embedding = match state.provider.embed(&[&embed_text]).await {
+        Ok(mut vecs) if !vecs.is_empty() => vecs.remove(0),
+        Ok(_) => return tool_error_response(request, "Embedding returned empty result"),
+        Err(e) => return tool_error_response(request, &format!("Embedding failed: {e}")),
+    };
+
+    let store_path = std::path::Path::new(&state.store_path);
+    let dimensions = state.provider.dimensions();
+
+    // Write snapshot with embedding
+    let yaml_path = match engram_store::write_snapshot_with_embedding(
+        store_path,
+        &snapshot,
+        &embedding,
+        dimensions,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to write snapshot: {e}"))
+        }
+    };
+
+    let rel_path = yaml_path
+        .strip_prefix(store_path)
+        .unwrap_or(&yaml_path)
+        .to_string_lossy()
+        .to_string();
+
+    // Commit to git
+    let committed = match git2::Repository::open(store_path) {
+        Ok(repo) => {
+            match engram_store::commit_changes(
+                &repo,
+                &format!("engram: snapshot session {session_id}"),
+            ) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return tool_error_response(
+                        request,
+                        &format!("Failed to commit: {e}"),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to open repository: {e}"))
+        }
+    };
+
+    let response_data = json!({
+        "session_id": session_id,
+        "path": rel_path,
+        "tier": "active",
+        "committed": committed,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 /// Read raw source text from a source repo for the given file path.
 fn read_source_content(state: &EngineState, repo: &str, file: &str) -> Option<String> {
     let root = state.source_roots.get(repo)?;
@@ -1256,7 +1380,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -1265,6 +1389,7 @@ mod tests {
         assert!(names.contains(&"engram_record_lesson"));
         assert!(names.contains(&"engram_record_pattern"));
         assert!(names.contains(&"engram_record_glossary"));
+        assert!(names.contains(&"engram_snapshot"));
     }
 
     #[tokio::test]

@@ -177,6 +177,33 @@ pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
             },
             "required": ["term", "definition"]
         }
+    }),
+    json!({
+        "name": "engram_snapshot",
+        "description": "Save a full conversation snapshot for session resumability. Writes to active tier, embeds summary + key_context for searchability, and commits to the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Unique identifier for the session"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Summary of the conversation or session"
+                },
+                "key_context": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Key context items for searchability"
+                },
+                "full_transcript": {
+                    "type": "string",
+                    "description": "Full conversation transcript"
+                }
+            },
+            "required": ["session_id", "summary", "key_context", "full_transcript"]
+        }
     })]
 }
 
@@ -246,12 +273,13 @@ mod tests {
     #[test]
     fn test_knowledge_tool_definitions_count() {
         let tools = knowledge_tool_definitions();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
         assert!(names.contains(&"engram_record_pattern"));
         assert!(names.contains(&"engram_record_glossary"));
+        assert!(names.contains(&"engram_snapshot"));
     }
 
     #[test]
@@ -334,5 +362,30 @@ mod tests {
         let glossary_tool = &tools[3];
         let props = glossary_tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("context"));
+    }
+
+    #[test]
+    fn test_snapshot_has_required_params() {
+        let tools = knowledge_tool_definitions();
+        let snapshot_tool = &tools[4];
+        assert_eq!(snapshot_tool["name"].as_str().unwrap(), "engram_snapshot");
+        let required = snapshot_tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"session_id"));
+        assert!(required_names.contains(&"summary"));
+        assert!(required_names.contains(&"key_context"));
+        assert!(required_names.contains(&"full_transcript"));
+        assert_eq!(required_names.len(), 4);
+    }
+
+    #[test]
+    fn test_snapshot_has_all_properties() {
+        let tools = knowledge_tool_definitions();
+        let snapshot_tool = &tools[4];
+        let props = snapshot_tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("session_id"));
+        assert!(props.contains_key("summary"));
+        assert!(props.contains_key("key_context"));
+        assert!(props.contains_key("full_transcript"));
     }
 }
