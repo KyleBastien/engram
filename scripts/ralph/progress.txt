@@ -89,6 +89,9 @@ Started: 03/09/2026 17:15:47
 - Mode enum uses manual Hash/PartialEq/Eq (by `.name()`) since Custom variant has f64 fields; `Mode::name()` returns `&str`
 - Custom definitions: `CustomDefinitions::load_from_store(path)` scans `.engram/contexts/` and `.engram/modes/` for YAML/YML files
 - Use `from_name_or_custom(name, &custom_defs)` on Context/Mode to resolve with custom-wins-on-conflict semantics
+- rust-embed v8: `#[derive(Embed)]` + `#[folder = "src/assets/"]`; axum nest() for prefix routing (not catch-all mid-path)
+- engram-dashboard depends on engram-core, axum 0.7, rust-embed 8, mime_guess 2, tokio 1
+- Dashboard server spawned via `tokio::spawn` in CLI serve command; runs on DashboardConfig.port (default 3200)
 
 ---
 
@@ -1509,4 +1512,18 @@ Started: 03/09/2026 17:15:47
   - Search integration pattern: clone active benchmark info at start of handler, check mode for disable/auto-log
   - When adding tools to all_tool_names(), must update: all_tool_names set, allowed_tools tests (3 contexts), tools_list tests (4), and custom context tests (2)
   - New tool category functions must be imported in server.rs and merged in handle_tools_list via tools.extend()
+---
+
+## 2026-03-10 - US-087
+- Implemented dashboard HTTP server in new engram-dashboard crate
+- Used axum 0.7 + rust-embed 8 for static file serving at /dashboard
+- Dashboard spawned alongside MCP server when dashboard.enabled=true and context != ci
+- Updated DashboardConfig default port from 9400 to 3200 to match AC
+- Files changed: Cargo.toml (workspace member), Cargo.lock, crates/engram-dashboard/* (new crate), crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs, crates/engram-core/src/config.rs
+- **Learnings for future iterations:**
+  - rust-embed v8 uses `#[derive(Embed)]` with `#[folder = "..."]` attribute
+  - axum 0.7 nest() is the right pattern for prefix routing (e.g. /dashboard/*), not catch-all routes under a prefix
+  - axum 0.7 catch-all syntax is `{*path}` but it can't be used mid-path like `/dashboard/{*path}` — use `nest("/dashboard", routes)` instead
+  - Dashboard is spawned via `tokio::spawn` in CLI serve command, runs concurrently with MCP server
+  - When changing config defaults, check for tests asserting old defaults (test_store_config_default in config.rs)
 ---
