@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
-use engram_dashboard::serve_dashboard;
+use engram_dashboard::{serve_dashboard, EventBroadcaster};
 use engram_mcp::{serve_sse, Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
@@ -249,8 +249,9 @@ async fn main() {
             // Start dashboard server if enabled and not in CI context
             if config.dashboard.enabled && context != "ci" {
                 let dashboard_config = config.dashboard.clone();
+                let broadcaster = EventBroadcaster::default();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_dashboard(&dashboard_config).await {
+                    if let Err(e) = serve_dashboard(&dashboard_config, broadcaster).await {
                         eprintln!("Warning: dashboard server error: {e}");
                     }
                 });
