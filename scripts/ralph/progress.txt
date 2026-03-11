@@ -1549,3 +1549,19 @@ Started: 03/09/2026 17:15:47
   - Use Arc<EventBroadcaster> as axum State for sharing across handlers
   - futures-util StreamExt is needed for .next() on WebSocket streams in tests; SinkExt only needed for .send() (close uses the stream directly)
 ---
+
+## 2026-03-10 - US-089
+- Implemented Live Session View dashboard frontend as vanilla HTML/JS in index.html
+- WebSocket connection to /ws with auto-reconnect and status indicator
+- Active Connections panel: table with client name, connected since (with relative time), request count
+- Search Query Stream panel: real-time feed with query text, code result count, knowledge result count, search time, KB HIT/MISS indicator, auto-scroll with 200-item cap
+- Context & Modes panel: shows active context, mode, total sessions, total queries
+- Handles session_connect, session_disconnect, search_query, context_switch, mode_switch events
+- Dark theme consistent with existing dashboard styling
+- Files changed: crates/engram-dashboard/src/assets/index.html
+- **Learnings for future iterations:**
+  - rust-embed recompiles assets from src/assets/ on change — no manual rebuild needed
+  - DashboardEvent has 5 variants (search_query, knowledge_write, reindex_progress, session_connect, session_disconnect) — context_switch/mode_switch would need to be added as new variants if backend sends them
+  - axum WebSocket at /ws, dashboard HTML at /dashboard — keep these paths separate
+  - Use IIFE pattern for vanilla JS to avoid polluting global scope
+---
