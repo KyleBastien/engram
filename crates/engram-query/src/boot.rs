@@ -278,6 +278,8 @@ impl IndexManager {
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
                     stale: false,
+                    tags: chunk.tags,
+                    indexed_at: chunk.indexed_at,
                 },
             );
         }
@@ -296,6 +298,8 @@ impl IndexManager {
                     start_line: 0,
                     end_line: 0,
                     stale: false,
+                    tags: chunk.tags,
+                    indexed_at: chunk.indexed_at,
                 },
             );
         }

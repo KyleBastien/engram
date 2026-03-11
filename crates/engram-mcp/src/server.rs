@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Pattern, Snapshot, SnapshotTier};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Partition, Pattern, Snapshot, SnapshotTier};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
@@ -216,6 +216,15 @@ async fn handle_tools_call(
     }
 }
 
+/// Default minimum relevance score for knowledge results.
+const DEFAULT_MIN_RELEVANCE: f64 = 0.6;
+
+/// Recency boost multiplier for knowledge items less than 30 days old.
+const RECENCY_BOOST: f64 = 1.1;
+
+/// Number of days within which knowledge items receive a recency boost.
+const RECENCY_DAYS: i64 = 30;
+
 async fn handle_engram_search(
     request: &JsonRpcRequest,
     state: Option<&EngineState>,
@@ -248,11 +257,11 @@ async fn handle_engram_search(
         .and_then(|c| c.as_bool())
         .unwrap_or(false);
 
-    // Validate scope (Phase 1: code, docs, all only)
-    if !matches!(scope, "code" | "docs" | "all") {
+    // Validate scope
+    if !matches!(scope, "code" | "docs" | "all" | "knowledge") {
         return tool_error_response(
             request,
-            &format!("Invalid scope: {scope}. Must be code, docs, or all"),
+            &format!("Invalid scope: {scope}. Must be code, docs, knowledge, or all"),
         );
     }
 
@@ -265,59 +274,81 @@ async fn handle_engram_search(
         Err(e) => return tool_error_response(request, &format!("Embedding failed: {e}")),
     };
 
-    // Run hybrid search
-    let results = match state
-        .search
-        .search(query, &embedding, top_k, DEFAULT_ALPHA, None)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return tool_error_response(request, &format!("Search failed: {e}")),
+    // Determine which partitions to search based on scope
+    let search_code_docs = matches!(scope, "code" | "docs" | "all");
+    let search_knowledge = matches!(scope, "knowledge" | "all");
+
+    // Run parallel queries: code/docs and knowledge sidecar
+    let code_doc_results = if search_code_docs {
+        let partitions = match scope {
+            "code" => vec![Partition::Code],
+            "docs" => vec![Partition::Docs],
+            _ => vec![Partition::Code, Partition::Docs],
+        };
+        match state
+            .search
+            .search(query, &embedding, top_k, DEFAULT_ALPHA, Some(&partitions))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return tool_error_response(request, &format!("Search failed: {e}")),
+        }
+    } else {
+        Vec::new()
     };
 
-    // Filter by scope
-    let results: Vec<&SearchResult> = results
-        .iter()
-        .filter(|r| matches_scope(&r.kind, scope))
-        .collect();
+    let knowledge_results = if search_knowledge {
+        match state
+            .search
+            .search(query, &embedding, top_k, DEFAULT_ALPHA, Some(&[Partition::Knowledge]))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return tool_error_response(request, &format!("Knowledge search failed: {e}")),
+        }
+    } else {
+        Vec::new()
+    };
 
-    let code_count = results.iter().filter(|r| is_code_kind(&r.kind)).count();
-    let search_time_ms = start.elapsed().as_millis() as u64;
+    let now = chrono::Utc::now();
 
-    // Format results
-    let formatted: Vec<serde_json::Value> = results
-        .iter()
-        .map(|r| {
-            let name = if compact {
-                truncate_name(&r.name, 50)
-            } else {
-                r.name.clone()
-            };
-            let mut obj = json!({
-                "chunk_id": r.chunk_id,
-                "score": r.score,
-                "kind": serde_json::to_value(&r.kind).unwrap_or_default(),
-                "name": name,
-                "file": r.file,
-                "repo": r.repo,
-                "lines": [r.lines.0, r.lines.1],
-                "stale": r.stale,
-            });
-            if !compact {
-                if let Some(sig) = &r.signature {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("signature".to_string(), json!(sig));
+    // Apply recency boost and min_relevance filter to knowledge results
+    let knowledge_results: Vec<SearchResult> = knowledge_results
+        .into_iter()
+        .map(|mut r| {
+            // Apply recency boost if item is less than RECENCY_DAYS old
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&r.indexed_at) {
+                let age_days = (now - created.with_timezone(&chrono::Utc)).num_days();
+                if age_days < RECENCY_DAYS {
+                    r.score *= RECENCY_BOOST;
                 }
             }
-            obj
+            r
         })
+        .filter(|r| r.score >= DEFAULT_MIN_RELEVANCE)
+        .collect();
+
+    let code_count = code_doc_results.iter().filter(|r| is_code_kind(&r.kind)).count();
+    let search_time_ms = start.elapsed().as_millis() as u64;
+
+    // Format code/doc results
+    let formatted_code: Vec<serde_json::Value> = code_doc_results
+        .iter()
+        .map(|r| format_code_result(r, compact))
+        .collect();
+
+    // Format knowledge results
+    let formatted_knowledge: Vec<serde_json::Value> = knowledge_results
+        .iter()
+        .map(format_knowledge_result)
         .collect();
 
     let response_data = json!({
-        "results": formatted,
+        "code_results": formatted_code,
+        "knowledge_results": formatted_knowledge,
         "meta": {
             "code_count": code_count,
+            "knowledge_count": formatted_knowledge.len(),
             "search_time_ms": search_time_ms,
             "compact": compact,
         }
@@ -333,6 +364,53 @@ async fn handle_engram_search(
             "isError": false
         }),
     )
+}
+
+fn format_code_result(r: &SearchResult, compact: bool) -> serde_json::Value {
+    let name = if compact {
+        truncate_name(&r.name, 50)
+    } else {
+        r.name.clone()
+    };
+    let mut obj = json!({
+        "chunk_id": r.chunk_id,
+        "score": r.score,
+        "kind": serde_json::to_value(&r.kind).unwrap_or_default(),
+        "name": name,
+        "file": r.file,
+        "repo": r.repo,
+        "lines": [r.lines.0, r.lines.1],
+        "stale": r.stale,
+    });
+    if !compact {
+        if let Some(sig) = &r.signature {
+            obj.as_object_mut()
+                .unwrap()
+                .insert("signature".to_string(), json!(sig));
+        }
+    }
+    obj
+}
+
+fn format_knowledge_result(r: &SearchResult) -> serde_json::Value {
+    // Extract kind and id from chunk_id format: "knowledge#{kind}:{id}"
+    let (kind, id) = if let Some(rest) = r.chunk_id.strip_prefix("knowledge#") {
+        if let Some((k, i)) = rest.split_once(':') {
+            (k.to_string(), i.to_string())
+        } else {
+            (r.tags.first().cloned().unwrap_or_default(), rest.to_string())
+        }
+    } else {
+        (r.tags.first().cloned().unwrap_or_default(), r.chunk_id.clone())
+    };
+
+    json!({
+        "kind": kind,
+        "id": id,
+        "title": r.name,
+        "relevance_score": r.score,
+        "created_at": r.indexed_at,
+    })
 }
 
 async fn handle_engram_lookup(
@@ -1152,17 +1230,6 @@ fn is_code_kind(kind: &ChunkKind) -> bool {
     )
 }
 
-fn matches_scope(kind: &ChunkKind, scope: &str) -> bool {
-    match scope {
-        "code" => is_code_kind(kind),
-        "docs" => matches!(
-            kind,
-            ChunkKind::DocSection | ChunkKind::Readme | ChunkKind::CommentBlock
-        ),
-        _ => true, // "all" or any other value
-    }
-}
-
 fn truncate_name(name: &str, max_len: usize) -> String {
     if name.len() <= max_len {
         name.to_string()
@@ -1198,7 +1265,7 @@ mod tests {
 
     use async_trait::async_trait;
     use engram_core::EmbedError;
-    use engram_query::{Bm25Document, Bm25Index, HnswIndex};
+    use engram_query::{Bm25Document, Bm25Index, HnswIndex, DOCS_KEY_OFFSET, KNOWLEDGE_KEY_OFFSET};
 
     fn make_request(id: i64, method: &str, params: Option<serde_json::Value>) -> String {
         let mut req = json!({
@@ -1279,6 +1346,8 @@ mod tests {
                 start_line: 1,
                 end_line: 10,
                 stale: false,
+                tags: Vec::new(),
+                indexed_at: String::new(),
             },
         )
     }
@@ -1299,7 +1368,8 @@ mod tests {
         let v2 = make_vector(dims, 2.0);
         let v3 = make_vector(dims, 3.0);
 
-        let entries: Vec<(u64, &[f32])> = vec![(0, &v0), (1, &v1), (2, &v2), (3, &v3)];
+        let doc_key = DOCS_KEY_OFFSET;
+        let entries: Vec<(u64, &[f32])> = vec![(0, &v0), (1, &v1), (2, &v2), (doc_key, &v3)];
         let hnsw = HnswIndex::build(&entries, dims).unwrap();
 
         let docs = vec![
@@ -1321,7 +1391,7 @@ mod tests {
                 Some("fn parse_config(path: &Path) -> Config"),
                 &["config"],
             ),
-            make_doc(3, "README", None, &["docs"]),
+            make_doc(doc_key, "README", None, &["docs"]),
         ];
         let bm25 = Bm25Index::build(&docs);
 
@@ -1329,10 +1399,90 @@ mod tests {
             make_entry(0, "calculate_total", "src/math.rs", ChunkKind::Function),
             make_entry(1, "render_button", "src/ui.rs", ChunkKind::Function),
             make_entry(2, "parse_config", "src/config.rs", ChunkKind::Function),
-            make_entry(3, "README", "README.md", ChunkKind::Readme),
         ]
         .into_iter()
         .collect();
+        // README in docs partition (key >= DOCS_KEY_OFFSET)
+        let mut metadata = metadata;
+        metadata.insert(doc_key, ChunkEntry {
+            chunk_id: "repo#README.md#README".to_string(),
+            kind: ChunkKind::Readme,
+            name: "README".to_string(),
+            signature: None,
+            file: "README.md".to_string(),
+            repo: "test-repo".to_string(),
+            start_line: 1,
+            end_line: 10,
+            stale: false,
+            tags: vec!["docs".to_string()],
+            indexed_at: String::new(),
+        });
+
+        let search = HybridSearch::new(hnsw, bm25, metadata);
+        let provider: Box<dyn EmbeddingProvider> = Box::new(MockEmbeddingProvider { dims });
+        (search, provider)
+    }
+
+    fn build_test_engine_with_knowledge() -> (HybridSearch, Box<dyn EmbeddingProvider>) {
+        let dims = 32;
+        let v0 = make_vector(dims, 0.0);
+        let v1 = make_vector(dims, 1.0);
+        let v2 = make_vector(dims, 2.0);
+        let v3 = make_vector(dims, 3.0);
+        let v_kn = make_vector(dims, 5.0);
+
+        let doc_key = DOCS_KEY_OFFSET;
+        let kn_key = KNOWLEDGE_KEY_OFFSET;
+
+        let entries: Vec<(u64, &[f32])> = vec![
+            (0, &v0), (1, &v1), (2, &v2), (doc_key, &v3), (kn_key, &v_kn),
+        ];
+        let hnsw = HnswIndex::build(&entries, dims).unwrap();
+
+        let docs = vec![
+            make_doc(0, "calculate_total", Some("fn calculate_total(items: &[Item]) -> f64"), &["math"]),
+            make_doc(1, "render_button", Some("fn render_button(label: &str)"), &["ui"]),
+            make_doc(2, "parse_config", Some("fn parse_config(path: &Path) -> Config"), &["config"]),
+            make_doc(doc_key, "README", None, &["docs"]),
+            make_doc(kn_key, "use_hnsw_decision", None, &["decision"]),
+        ];
+        let bm25 = Bm25Index::build(&docs);
+
+        let mut metadata: HashMap<u64, ChunkEntry> = vec![
+            make_entry(0, "calculate_total", "src/math.rs", ChunkKind::Function),
+            make_entry(1, "render_button", "src/ui.rs", ChunkKind::Function),
+            make_entry(2, "parse_config", "src/config.rs", ChunkKind::Function),
+        ]
+        .into_iter()
+        .collect();
+        metadata.insert(doc_key, ChunkEntry {
+            chunk_id: "repo#README.md#README".to_string(),
+            kind: ChunkKind::Readme,
+            name: "README".to_string(),
+            signature: None,
+            file: "README.md".to_string(),
+            repo: "test-repo".to_string(),
+            start_line: 1,
+            end_line: 10,
+            stale: false,
+            tags: vec!["docs".to_string()],
+            indexed_at: String::new(),
+        });
+
+        // Add a knowledge item with a recent created_at
+        metadata.insert(kn_key, ChunkEntry {
+            chunk_id: "knowledge#decision:DEC-001".to_string(),
+            kind: ChunkKind::Knowledge,
+            name: "Use HNSW for vector search".to_string(),
+            signature: None,
+            file: String::new(),
+            repo: "knowledge".to_string(),
+            start_line: 0,
+            end_line: 0,
+            stale: false,
+            tags: vec!["decision".to_string()],
+            indexed_at: chrono::Utc::now().to_rfc3339(),
+        });
 
         let search = HybridSearch::new(hnsw, bm25, metadata);
         let provider: Box<dyn EmbeddingProvider> = Box::new(MockEmbeddingProvider { dims });
@@ -1353,10 +1503,36 @@ mod tests {
             .collect()
     }
 
+    async fn run_server_with_knowledge_engine(input: &str) -> Vec<JsonRpcResponse> {
+        let (search, provider) = build_test_engine_with_knowledge();
+        let server = McpServer::with_engine(search, provider);
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
     fn parse_tool_text(response: &JsonRpcResponse) -> serde_json::Value {
         let result = response.result.as_ref().unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    fn matches_scope(kind: &ChunkKind, scope: &str) -> bool {
+        match scope {
+            "code" => is_code_kind(kind),
+            "docs" => matches!(
+                kind,
+                ChunkKind::DocSection | ChunkKind::Readme | ChunkKind::CommentBlock
+            ),
+            "knowledge" => matches!(kind, ChunkKind::Knowledge),
+            _ => true,
+        }
     }
 
     // --- Existing server tests (updated for McpServer::new()) ---
@@ -1539,9 +1715,11 @@ mod tests {
         assert_eq!(result["isError"], false);
 
         let data = parse_tool_text(&responses[0]);
-        assert!(data["results"].is_array());
+        assert!(data["code_results"].is_array());
+        assert!(data["knowledge_results"].is_array());
         assert!(data["meta"].is_object());
         assert!(data["meta"]["code_count"].is_number());
+        assert!(data["meta"]["knowledge_count"].is_number());
         assert!(data["meta"]["search_time_ms"].is_number());
         assert!(data["meta"]["compact"].is_boolean());
     }
@@ -1555,7 +1733,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
         assert!(!results.is_empty());
 
         let r = &results[0];
@@ -1578,7 +1756,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
 
         // At least one result with a function kind should have a signature
         let has_sig = results
@@ -1598,7 +1776,7 @@ mod tests {
         let data = parse_tool_text(&responses[0]);
         assert_eq!(data["meta"]["compact"], true);
 
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
         for r in results {
             assert!(
                 r.get("signature").is_none(),
@@ -1616,7 +1794,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
 
         // No doc kinds should appear with scope=code
         for r in results {
@@ -1637,7 +1815,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
 
         // No code kinds should appear with scope=docs
         for r in results {
@@ -1654,7 +1832,7 @@ mod tests {
         let input = make_request(
             1,
             "tools/call",
-            Some(json!({"name": "engram_search", "arguments": {"query": "test", "scope": "knowledge"}})),
+            Some(json!({"name": "engram_search", "arguments": {"query": "test", "scope": "invalid_scope"}})),
         );
         let responses = run_server_with_engine(&input).await;
         let result = responses[0].result.as_ref().unwrap();
@@ -1672,7 +1850,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
         assert!(results.len() <= 2);
     }
 
@@ -1685,7 +1863,7 @@ mod tests {
         );
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
 
         // With scope=all (default), we should get both code and doc results
         let kinds: Vec<&str> = results
@@ -1710,7 +1888,7 @@ mod tests {
         let responses = run_server_with_engine(&input).await;
         let data = parse_tool_text(&responses[0]);
         let code_count = data["meta"]["code_count"].as_u64().unwrap();
-        let results = data["results"].as_array().unwrap();
+        let results = data["code_results"].as_array().unwrap();
 
         // code_count should equal number of code-kind results
         let actual_code = results
@@ -1721,6 +1899,141 @@ mod tests {
             })
             .count() as u64;
         assert_eq!(code_count, actual_code);
+    }
+
+    // --- Sidecar knowledge search tests ---
+
+    #[tokio::test]
+    async fn test_search_all_includes_knowledge_results() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw vector"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+
+        assert!(data["code_results"].is_array());
+        assert!(data["knowledge_results"].is_array());
+        assert!(data["meta"]["knowledge_count"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_search_scope_knowledge_returns_only_knowledge() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw", "scope": "knowledge"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+
+        // code_results should be empty when scope is knowledge
+        let code = data["code_results"].as_array().unwrap();
+        assert!(code.is_empty(), "knowledge scope should not return code results");
+
+        // knowledge_results should have results
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(!knowledge.is_empty(), "knowledge scope should return knowledge results");
+    }
+
+    #[tokio::test]
+    async fn test_search_scope_code_excludes_knowledge() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision", "scope": "code"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+
+        // knowledge_results should be empty when scope is code
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(knowledge.is_empty(), "code scope should not return knowledge results");
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_results_have_required_fields() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw", "scope": "knowledge"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(!knowledge.is_empty());
+
+        let kr = &knowledge[0];
+        assert!(kr["kind"].is_string(), "knowledge result must have kind");
+        assert!(kr["id"].is_string(), "knowledge result must have id");
+        assert!(kr["title"].is_string(), "knowledge result must have title");
+        assert!(kr["relevance_score"].is_number(), "knowledge result must have relevance_score");
+        assert!(kr["created_at"].is_string(), "knowledge result must have created_at");
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_result_kind_and_id_parsed() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw", "scope": "knowledge"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(!knowledge.is_empty());
+
+        let kr = &knowledge[0];
+        assert_eq!(kr["kind"].as_str().unwrap(), "decision");
+        assert_eq!(kr["id"].as_str().unwrap(), "DEC-001");
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_recency_boost_applied() {
+        // The test engine creates a knowledge item with created_at = now (< 30 days)
+        // So the recency boost should be applied (score * 1.1)
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw", "scope": "knowledge"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(!knowledge.is_empty());
+
+        // Score should exist and be positive (boosted)
+        let score = knowledge[0]["relevance_score"].as_f64().unwrap();
+        assert!(score > 0.0, "knowledge result should have positive score");
+    }
+
+    #[tokio::test]
+    async fn test_search_scope_docs_excludes_knowledge() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision", "scope": "docs"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        assert!(knowledge.is_empty(), "docs scope should not return knowledge results");
+    }
+
+    #[tokio::test]
+    async fn test_search_knowledge_count_in_meta() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "decision hnsw"}})),
+        );
+        let responses = run_server_with_knowledge_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let knowledge = data["knowledge_results"].as_array().unwrap();
+        let knowledge_count = data["meta"]["knowledge_count"].as_u64().unwrap();
+        assert_eq!(knowledge_count, knowledge.len() as u64);
     }
 
     // --- Helper function unit tests ---
@@ -1772,10 +2085,18 @@ mod tests {
     }
 
     #[test]
+    fn test_matches_scope_knowledge() {
+        assert!(matches_scope(&ChunkKind::Knowledge, "knowledge"));
+        assert!(!matches_scope(&ChunkKind::Function, "knowledge"));
+        assert!(!matches_scope(&ChunkKind::Readme, "knowledge"));
+    }
+
+    #[test]
     fn test_matches_scope_all() {
         assert!(matches_scope(&ChunkKind::Function, "all"));
         assert!(matches_scope(&ChunkKind::Readme, "all"));
         assert!(matches_scope(&ChunkKind::DocSection, "all"));
+        assert!(matches_scope(&ChunkKind::Knowledge, "all"));
     }
 
     // --- engram_lookup tool tests ---
@@ -2624,6 +2945,8 @@ mod tests {
             start_line: 1,
             end_line: 5,
             stale: true,
+            tags: Vec::new(),
+            indexed_at: String::new(),
         });
         metadata.insert(1, ChunkEntry {
             chunk_id: "repo#b.rs#func_b".to_string(),
@@ -2635,6 +2958,8 @@ mod tests {
             start_line: 1,
             end_line: 5,
             stale: false,
+            tags: Vec::new(),
+            indexed_at: String::new(),
         });
 
         let search = HybridSearch::new(hnsw, bm25, metadata);

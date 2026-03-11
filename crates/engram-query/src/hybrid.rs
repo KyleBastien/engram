@@ -19,6 +19,8 @@ pub struct SearchResult {
     pub repo: String,
     pub lines: (u32, u32),
     pub stale: bool,
+    pub tags: Vec<String>,
+    pub indexed_at: String,
 }
 
 /// Metadata entry for a chunk, used to build SearchResults.
@@ -32,6 +34,8 @@ pub struct ChunkEntry {
     pub start_line: u32,
     pub end_line: u32,
     pub stale: bool,
+    pub tags: Vec<String>,
+    pub indexed_at: String,
 }
 
 /// Hybrid search combining HNSW vector search and BM25 keyword search.
@@ -171,6 +175,8 @@ impl HybridSearch {
                     repo: entry.repo.clone(),
                     lines: (entry.start_line, entry.end_line),
                     stale: entry.stale,
+                    tags: entry.tags.clone(),
+                    indexed_at: entry.indexed_at.clone(),
                 })
             })
             .collect();
@@ -285,6 +291,8 @@ mod tests {
                 start_line: 1,
                 end_line: 10,
                 stale: false,
+                tags: Vec::new(),
+                indexed_at: String::new(),
             },
         )
     }
@@ -472,6 +480,8 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 stale: true,
+                tags: Vec::new(),
+                indexed_at: String::new(),
             },
         );
 
@@ -586,6 +596,8 @@ mod tests {
             start_line: 1,
             end_line: 10,
             stale: false,
+            tags: vec!["math".to_string()],
+            indexed_at: String::new(),
         });
         metadata.insert(1, ChunkEntry {
             chunk_id: "repo#src/ui.rs#render_button".to_string(),
@@ -597,6 +609,8 @@ mod tests {
             start_line: 1,
             end_line: 10,
             stale: false,
+            tags: vec!["ui".to_string()],
+            indexed_at: String::new(),
         });
         metadata.insert(KNOWLEDGE_KEY_OFFSET, ChunkEntry {
             chunk_id: "knowledge#decision:DEC-001".to_string(),
@@ -608,6 +622,8 @@ mod tests {
             start_line: 0,
             end_line: 0,
             stale: false,
+            tags: vec!["decision".to_string()],
+            indexed_at: "2026-03-01T00:00:00Z".to_string(),
         });
 
         HybridSearch::new(hnsw, bm25, metadata)

@@ -5,7 +5,7 @@ pub fn phase1_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         json!({
             "name": "engram_search",
-            "description": "Hybrid semantic + keyword search over indexed code and documentation. Returns ranked results combining vector similarity and BM25 keyword matching.",
+            "description": "Hybrid semantic + keyword search over indexed code, documentation, and knowledge. Returns ranked code_results and knowledge_results combining vector similarity and BM25 keyword matching.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -15,8 +15,8 @@ pub fn phase1_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "scope": {
                         "type": "string",
-                        "enum": ["code", "docs", "all"],
-                        "description": "Search scope: code, docs, or all (default: all)"
+                        "enum": ["code", "docs", "all", "knowledge"],
+                        "description": "Search scope: code (code only), docs (docs only), knowledge (knowledge only), or all (code+docs+knowledge sidecar) (default: all)"
                     },
                     "top_k": {
                         "type": "integer",
