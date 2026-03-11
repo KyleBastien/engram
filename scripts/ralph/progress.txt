@@ -78,6 +78,8 @@ Started: 03/09/2026 17:15:47
 - usearch Index.get(key, &mut buffer) retrieves stored vectors; HnswIndex.get_vector(key) wraps this for Option<Vec<f32>> access
 - git2 `remote.list()` crashes on empty bare repos; use clone-then-check-HEAD instead of probing to detect empty remotes
 - `Repository::clone()` on empty bare repo may succeed with no HEAD — check `repo.head().is_ok()` to detect this
+- serde v1 (with "derive" feature) is a direct dependency of engram-store for Serialize on sync types
+- git2 merge workflow: fetch → FETCH_HEAD → merge_analysis → fast_forward/merge → resolve conflicts → commit(2 parents) → cleanup_state
 
 ---
 
@@ -1256,4 +1258,23 @@ Started: 03/09/2026 17:15:47
   - git doesn't track empty directories — cloned stores won't have empty dirs like `index/`, `knowledge/decisions/`, etc. unless they contain files
   - git2 borrow checker: scope borrows on `Reference` and `Remote` before moving `Repository` into struct returns
   - Use `is_some_and()` (not `map_or(false, ...)`) per clippy `unnecessary_map_or` lint
+---
+
+## 2026-03-10 - US-073
+- Implemented `sync_pull(store_root) -> Result<SyncReport>` and `sync_push(store_root) -> Result<SyncReport>` in new `sync.rs` module
+- `SyncReport` includes: direction (Pull/Push enum), commits_transferred, conflicts (Vec<String>)
+- `sync_pull`: fetches from origin, analyzes merge (up-to-date / fast-forward / normal), resolves conflicts per strategy
+- `sync_push`: pushes current branch refspec to origin, counts commits ahead of remote tracking branch
+- Conflict resolution: chunk files use last-write-wins (accept theirs/remote version); manifest.json uses field merging (higher chunk_count, more recent updated_at, union source_repos, merge last_indexed_commits with theirs winning per key)
+- Added `serde` (v1, derive feature) as direct dependency of engram-store for `Serialize` derive on SyncReport/SyncDirection
+- 15 new tests: no remote changes, push transfers, fast-forward pull, merge no conflict, conflict last-write-wins, manifest conflict merge, push no changes, push multiple commits, no remote errors (pull+push), merge_manifests unit tests (chunk_count, updated_at, source_repos, indexed_commits), serialization
+- All 98 engram-store tests pass, clippy workspace clean
+- Files changed: crates/engram-store/src/sync.rs (new), crates/engram-store/src/lib.rs, crates/engram-store/Cargo.toml
+- **Learnings for future iterations:**
+  - git2 merge workflow: fetch → find FETCH_HEAD → merge_analysis → fast_forward or merge → resolve conflicts → commit with two parents → cleanup_state
+  - git2 Index.has_conflicts() + Index.conflicts() iterator for detecting and iterating conflict entries (ancestor/our/their)
+  - git2 conflict resolution: read blob content from our/their OID, write resolved content to disk, then stage all with add_all
+  - serde (v1, derive) is now a direct dependency of engram-store (previously only transitive through engram-core)
+  - count_commits_between uses revwalk with push/hide for counting new commits after pull
+  - count_commits_ahead compares local HEAD to refs/remotes/origin/{branch} for push commit counting
 ---
