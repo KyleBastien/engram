@@ -283,6 +283,24 @@ pub fn related_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for sync MCP tools.
+pub fn sync_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_sync",
+        "description": "Synchronize the local store with its configured remote. Pulls changes from and/or pushes changes to the remote repository, resolving conflicts automatically.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["pull", "push", "both"],
+                    "description": "Sync direction: pull (fetch remote changes), push (push local changes), or both (pull then push). Default: both"
+                }
+            }
+        }
+    })]
+}
+
 /// Returns tool definitions for graph exploration MCP tools.
 pub fn graph_tool_definitions() -> Vec<serde_json::Value> {
     vec![json!({
@@ -603,5 +621,33 @@ mod tests {
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("direction"));
         assert!(props.contains_key("depth"));
+    }
+
+    #[test]
+    fn test_sync_tool_definitions_count() {
+        let tools = sync_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_sync");
+    }
+
+    #[test]
+    fn test_sync_has_no_required_params() {
+        let tools = sync_tool_definitions();
+        let tool = &tools[0];
+        assert!(tool["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_sync_has_direction_param() {
+        let tools = sync_tool_definitions();
+        let tool = &tools[0];
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("direction"));
+        let direction = &props["direction"];
+        let enum_values = direction["enum"].as_array().unwrap();
+        let values: Vec<&str> = enum_values.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(values.contains(&"pull"));
+        assert!(values.contains(&"push"));
+        assert!(values.contains(&"both"));
     }
 }

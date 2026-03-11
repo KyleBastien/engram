@@ -10,7 +10,7 @@ use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson,
 use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions};
+use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -258,6 +258,7 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     tools.extend(assessment_tool_definitions());
     tools.extend(graph_tool_definitions());
     tools.extend(related_tool_definitions());
+    tools.extend(sync_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -290,6 +291,7 @@ async fn handle_tools_call(
         "engram_check_staleness" => handle_engram_check_staleness(request, state).await,
         "engram_graph" => handle_engram_graph(request, state).await,
         "engram_related" => handle_engram_related(request, state).await,
+        "engram_sync" => handle_engram_sync(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -1832,6 +1834,75 @@ async fn handle_engram_related(
     )
 }
 
+async fn handle_engram_sync(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let store_path = std::path::Path::new(&state.store_path);
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let direction = args
+        .get("direction")
+        .and_then(|d| d.as_str())
+        .unwrap_or("both");
+
+    let mut reports = Vec::new();
+
+    match direction {
+        "pull" => match engram_store::sync_pull(store_path) {
+            Ok(report) => reports.push(report),
+            Err(e) => return tool_error_response(request, &format!("Pull failed: {e}")),
+        },
+        "push" => match engram_store::sync_push(store_path) {
+            Ok(report) => reports.push(report),
+            Err(e) => return tool_error_response(request, &format!("Push failed: {e}")),
+        },
+        "both" => {
+            match engram_store::sync_pull(store_path) {
+                Ok(report) => reports.push(report),
+                Err(e) => return tool_error_response(request, &format!("Pull failed: {e}")),
+            }
+            match engram_store::sync_push(store_path) {
+                Ok(report) => reports.push(report),
+                Err(e) => return tool_error_response(request, &format!("Push failed: {e}")),
+            }
+        }
+        other => {
+            return tool_error_response(
+                request,
+                &format!("Invalid direction '{other}': must be pull, push, or both"),
+            )
+        }
+    }
+
+    let response_data = json!({
+        "direction": direction,
+        "reports": reports,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -2184,7 +2255,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -2199,6 +2270,7 @@ mod tests {
         assert!(names.contains(&"engram_onboard"));
         assert!(names.contains(&"engram_assess_context"));
         assert!(names.contains(&"engram_check_staleness"));
+        assert!(names.contains(&"engram_sync"));
     }
 
     #[tokio::test]
