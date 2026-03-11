@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use engram_core::{
-    BenchmarkEvent, BenchmarkMode, BenchmarkReport, BenchmarkSession, TaskOutcome,
+    BenchmarkEvent, BenchmarkMode, BenchmarkReport, BenchmarkSession, ComparisonReport,
+    MetricComparison, TaskOutcome,
 };
 
 struct ActiveSession {
@@ -165,6 +166,68 @@ pub fn compute_metrics(events: &[BenchmarkEvent], session: &BenchmarkSession) ->
         search_to_read_ratio,
         context_waste_tokens,
     }
+}
+
+/// Compare a baseline report with an assisted report, producing a metric-by-metric comparison.
+///
+/// For each metric, computes absolute and percentage differences.
+/// `assisted_better` is true when the assisted value is an improvement:
+/// - Lower is better for: token_efficiency, time_to_first_edit_ms, file_read_count, context_waste_tokens
+/// - Higher is better for: retrieval_precision, retrieval_recall, search_to_read_ratio
+pub fn compare(baseline: &BenchmarkReport, assisted: &BenchmarkReport) -> ComparisonReport {
+    let metrics = vec![
+        make_comparison("token_efficiency", baseline.token_efficiency, assisted.token_efficiency, false),
+        make_comparison("retrieval_precision", baseline.retrieval_precision, assisted.retrieval_precision, true),
+        make_comparison("retrieval_recall", baseline.retrieval_recall, assisted.retrieval_recall, true),
+        make_comparison("time_to_first_edit_ms", baseline.time_to_first_edit_ms as f64, assisted.time_to_first_edit_ms as f64, false),
+        make_comparison("file_read_count", baseline.file_read_count as f64, assisted.file_read_count as f64, false),
+        make_comparison("search_to_read_ratio", baseline.search_to_read_ratio, assisted.search_to_read_ratio, true),
+        make_comparison("context_waste_tokens", baseline.context_waste_tokens as f64, assisted.context_waste_tokens as f64, false),
+    ];
+
+    ComparisonReport {
+        baseline_session_id: baseline.session_id.clone(),
+        assisted_session_id: assisted.session_id.clone(),
+        metrics,
+    }
+}
+
+fn make_comparison(name: &str, baseline_value: f64, assisted_value: f64, higher_is_better: bool) -> MetricComparison {
+    let absolute_diff = assisted_value - baseline_value;
+    let percentage_diff = if baseline_value.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (absolute_diff / baseline_value) * 100.0
+    };
+    let assisted_better = if higher_is_better {
+        assisted_value > baseline_value
+    } else {
+        assisted_value < baseline_value
+    };
+
+    MetricComparison {
+        metric_name: name.to_string(),
+        baseline_value,
+        assisted_value,
+        absolute_diff,
+        percentage_diff,
+        assisted_better,
+    }
+}
+
+/// Write a comparison report as YAML to the metrics/ directory.
+pub fn write_comparison_report(store_root: &std::path::Path, report: &ComparisonReport) {
+    let comparisons_dir = store_root.join("metrics").join("comparisons");
+    fs::create_dir_all(&comparisons_dir).expect("failed to create metrics/comparisons directory");
+
+    let filename = format!(
+        "{}_vs_{}.yaml",
+        sanitize_timestamp(&report.baseline_session_id),
+        sanitize_timestamp(&report.assisted_session_id),
+    );
+    let path = comparisons_dir.join(filename);
+    let yaml = serde_yaml::to_string(report).expect("serialize comparison report to YAML");
+    fs::write(path, yaml).expect("failed to write comparison report");
 }
 
 fn now_iso8601() -> String {
@@ -444,6 +507,152 @@ mod tests {
         assert_eq!(report.file_read_count, 4);
         // search_to_read_ratio = 2 searches / 4 reads = 0.5
         assert!((report.search_to_read_ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compare_produces_correct_metric_comparisons() {
+        let baseline = BenchmarkReport {
+            session_id: "baseline-1".to_string(),
+            mode: BenchmarkMode::Baseline,
+            token_efficiency: 200.0,
+            retrieval_precision: 0.4,
+            retrieval_recall: 0.3,
+            time_to_first_edit_ms: 10000,
+            file_read_count: 20,
+            search_to_read_ratio: 0.3,
+            context_waste_tokens: 500,
+        };
+        let assisted = BenchmarkReport {
+            session_id: "assisted-1".to_string(),
+            mode: BenchmarkMode::Assisted,
+            token_efficiency: 100.0,
+            retrieval_precision: 0.8,
+            retrieval_recall: 0.6,
+            time_to_first_edit_ms: 5000,
+            file_read_count: 10,
+            search_to_read_ratio: 0.6,
+            context_waste_tokens: 200,
+        };
+
+        let report = compare(&baseline, &assisted);
+        assert_eq!(report.baseline_session_id, "baseline-1");
+        assert_eq!(report.assisted_session_id, "assisted-1");
+        assert_eq!(report.metrics.len(), 7);
+
+        // token_efficiency: lower is better, 200 -> 100, assisted is better
+        let te = &report.metrics[0];
+        assert_eq!(te.metric_name, "token_efficiency");
+        assert!((te.absolute_diff - (-100.0)).abs() < f64::EPSILON);
+        assert!((te.percentage_diff - (-50.0)).abs() < f64::EPSILON);
+        assert!(te.assisted_better);
+
+        // retrieval_precision: higher is better, 0.4 -> 0.8, assisted is better
+        let rp = &report.metrics[1];
+        assert_eq!(rp.metric_name, "retrieval_precision");
+        assert!((rp.absolute_diff - 0.4).abs() < f64::EPSILON);
+        assert!((rp.percentage_diff - 100.0).abs() < f64::EPSILON);
+        assert!(rp.assisted_better);
+
+        // file_read_count: lower is better, 20 -> 10, assisted is better
+        let frc = &report.metrics[4];
+        assert!(frc.assisted_better);
+    }
+
+    #[test]
+    fn compare_marks_worse_metrics_as_not_better() {
+        let baseline = BenchmarkReport {
+            session_id: "b".to_string(),
+            mode: BenchmarkMode::Baseline,
+            token_efficiency: 50.0,
+            retrieval_precision: 0.9,
+            retrieval_recall: 0.8,
+            time_to_first_edit_ms: 1000,
+            file_read_count: 5,
+            search_to_read_ratio: 0.8,
+            context_waste_tokens: 10,
+        };
+        let assisted = BenchmarkReport {
+            session_id: "a".to_string(),
+            mode: BenchmarkMode::Assisted,
+            token_efficiency: 100.0, // worse (higher)
+            retrieval_precision: 0.5, // worse (lower)
+            retrieval_recall: 0.4,
+            time_to_first_edit_ms: 2000,
+            file_read_count: 10,
+            search_to_read_ratio: 0.4,
+            context_waste_tokens: 50,
+        };
+
+        let report = compare(&baseline, &assisted);
+        // All metrics should be worse
+        for m in &report.metrics {
+            assert!(!m.assisted_better, "metric {} should not be better", m.metric_name);
+        }
+    }
+
+    #[test]
+    fn compare_handles_zero_baseline() {
+        let baseline = BenchmarkReport {
+            session_id: "b".to_string(),
+            mode: BenchmarkMode::Baseline,
+            token_efficiency: 0.0,
+            retrieval_precision: 0.0,
+            retrieval_recall: 0.0,
+            time_to_first_edit_ms: 0,
+            file_read_count: 0,
+            search_to_read_ratio: 0.0,
+            context_waste_tokens: 0,
+        };
+        let assisted = BenchmarkReport {
+            session_id: "a".to_string(),
+            mode: BenchmarkMode::Assisted,
+            token_efficiency: 100.0,
+            retrieval_precision: 0.5,
+            retrieval_recall: 0.0,
+            time_to_first_edit_ms: 0,
+            file_read_count: 0,
+            search_to_read_ratio: 0.0,
+            context_waste_tokens: 0,
+        };
+
+        let report = compare(&baseline, &assisted);
+        // Zero baseline => percentage_diff should be 0.0 (no division by zero)
+        for m in &report.metrics {
+            assert!(m.percentage_diff.is_finite(), "metric {} has non-finite percentage", m.metric_name);
+        }
+    }
+
+    #[test]
+    fn write_comparison_report_creates_yaml_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = ComparisonReport {
+            baseline_session_id: "baseline-1".to_string(),
+            assisted_session_id: "assisted-1".to_string(),
+            metrics: vec![MetricComparison {
+                metric_name: "token_efficiency".to_string(),
+                baseline_value: 200.0,
+                assisted_value: 100.0,
+                absolute_diff: -100.0,
+                percentage_diff: -50.0,
+                assisted_better: true,
+            }],
+        };
+
+        write_comparison_report(dir.path(), &report);
+
+        let comparisons_dir = dir.path().join("metrics").join("comparisons");
+        let entries: Vec<_> = fs::read_dir(&comparisons_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+
+        let content = fs::read_to_string(entries[0].path()).unwrap();
+        let deserialized: ComparisonReport =
+            serde_yaml::from_str(&content).expect("deserialize YAML");
+        assert_eq!(deserialized.baseline_session_id, "baseline-1");
+        assert_eq!(deserialized.metrics.len(), 1);
+        assert!(deserialized.metrics[0].assisted_better);
     }
 
     #[test]

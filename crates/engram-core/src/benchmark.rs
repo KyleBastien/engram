@@ -59,6 +59,25 @@ pub struct BenchmarkReport {
     pub context_waste_tokens: u64,
 }
 
+/// Comparison of a single metric between baseline and assisted runs.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MetricComparison {
+    pub metric_name: String,
+    pub baseline_value: f64,
+    pub assisted_value: f64,
+    pub absolute_diff: f64,
+    pub percentage_diff: f64,
+    pub assisted_better: bool,
+}
+
+/// Comparison report between a baseline and assisted benchmark run.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ComparisonReport {
+    pub baseline_session_id: String,
+    pub assisted_session_id: String,
+    pub metrics: Vec<MetricComparison>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

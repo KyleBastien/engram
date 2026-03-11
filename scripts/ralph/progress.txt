@@ -1474,3 +1474,19 @@ Started: 03/09/2026 17:15:47
 - **Learnings for future iterations:**
   - Stories may be satisfied by prior implementation — always check existing code before writing new code
 ---
+
+## 2026-03-10 - US-085
+- Implemented `compare(baseline, assisted) -> ComparisonReport` in engram-bench
+- Added `ComparisonReport` and `MetricComparison` types to engram-core/src/benchmark.rs with serde derives
+- `compare()` produces 7 metric comparisons with absolute/percentage diffs and `assisted_better` flag
+- Lower-is-better metrics: token_efficiency, time_to_first_edit_ms, file_read_count, context_waste_tokens
+- Higher-is-better metrics: retrieval_precision, retrieval_recall, search_to_read_ratio
+- Added `write_comparison_report()` to serialize as YAML to `metrics/comparisons/`
+- Added serde_yaml 0.9 dependency to engram-bench
+- 4 new tests (13 total): correct comparisons, worse metrics, zero baseline, YAML file write
+- Files changed: crates/engram-core/src/benchmark.rs, crates/engram-core/src/lib.rs, crates/engram-bench/Cargo.toml, crates/engram-bench/src/lib.rs
+- **Learnings for future iterations:**
+  - Zero-baseline guard: return 0.0 percentage_diff when baseline is zero to avoid division by zero
+  - `sanitize_timestamp` also useful for session IDs in filenames (colons → hyphens)
+  - serde_yaml 0.9 now a dependency of engram-bench (joins engram-core and engram-ingest)
+---
