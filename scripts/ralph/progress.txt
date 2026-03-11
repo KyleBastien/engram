@@ -85,6 +85,10 @@ Started: 03/09/2026 17:15:47
 - handle_tools_call takes `(request, state, context)` — new tools needing context info can access it directly
 - When adding tools to allowed_tools(), update 5 test assertions: test_default/ci/cursor/claude_code context tests + test_tools_list_returns_phase1_tools
 - Config/introspection tools (switch_mode, get_config) are available in ALL contexts
+- `allowed_tools()` returns `HashSet<String>` (not `&'static str`) — `.contains("str")` still works via `Borrow<str>`
+- Mode enum uses manual Hash/PartialEq/Eq (by `.name()`) since Custom variant has f64 fields; `Mode::name()` returns `&str`
+- Custom definitions: `CustomDefinitions::load_from_store(path)` scans `.engram/contexts/` and `.engram/modes/` for YAML/YML files
+- Use `from_name_or_custom(name, &custom_defs)` on Context/Mode to resolve with custom-wins-on-conflict semantics
 
 ---
 
@@ -1383,4 +1387,26 @@ Started: 03/09/2026 17:15:47
   - Config/introspection tools (switch_mode, get_config) should be available in ALL contexts, not just full-agent contexts
   - When adding tools to `allowed_tools()`, update 4 separate test assertions: `test_default_context_allows_all_tools`, `test_ci_context_allows_minimal_tools`, `test_cursor_context_allows_read_only_tools`, `test_claude_code_context_allows_all_tools` plus the integration test `test_tools_list_returns_phase1_tools`
   - `engram_get_config` gracefully handles no-engine state (returns null for search_config and embedding_provider)
+---
+
+## 2026-03-10 - US-080
+- Implemented custom context and mode YAML definitions
+- Created new `custom.rs` module with `CustomContextDef`, `CustomModeDef`, `CustomDefinitions` types
+- `CustomDefinitions::load_from_store()` scans `.engram/contexts/` and `.engram/modes/` for YAML files
+- Extended `Context` enum with `Custom(CustomContextDef)` variant; custom contexts start with all tools then apply `tools.exclude`
+- Extended `Mode` enum with `Custom { name, behavior }` variant; custom modes carry `ModeBehavior` inline
+- Manual `Hash`, `PartialEq`, `Eq` implementations on `Mode` to support `f64` in Custom variant (compares by name)
+- `Context::from_name_or_custom()` and `Mode::from_name_or_custom()` check custom definitions first (custom wins on conflict)
+- `EngineState` holds `custom_definitions: CustomDefinitions`; `McpServer::load_custom_definitions()` sets it
+- `engram_switch_mode` updated to accept custom mode names via `from_name_or_custom`
+- `allowed_tools()` returns `HashSet<String>` instead of `HashSet<&'static str>` to support custom context tool names
+- `engram_get_config` shows custom context name when custom context is active
+- 17 new tests covering: YAML deserialization, tool exclusion, custom mode behavior, ModeTracker with custom modes, conflict resolution, tools/list filtering, get_config with custom context
+- Files changed: crates/engram-mcp/src/custom.rs (new), crates/engram-mcp/src/lib.rs, crates/engram-mcp/src/server.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - `allowed_tools()` now returns `HashSet<String>` (was `HashSet<&'static str>`) — callers using `.contains("str")` still work via `Borrow<str>` trait
+  - Mode enum now uses manual Hash/PartialEq/Eq (based on `.name()`) since Custom variant has f64 fields
+  - `Mode::name()` now returns `&str` (was `&'static str`) — backward compatible since callers just need `&str`
+  - Custom YAML loading uses `serde_yaml::from_str` and silently skips invalid files (logs to stderr)
+  - Both `.yaml` and `.yml` extensions are accepted for custom definition files
 ---

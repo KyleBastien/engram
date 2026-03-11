@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -9,22 +10,43 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, OnboardingDepth, Partition, Pattern, Snapshot, SnapshotTier, SourceConfig};
 use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
+use crate::custom::{CustomContextDef, CustomDefinitions};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
 use crate::tools::{assessment_tool_definitions, config_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
 
 /// Built-in modes that affect search behavior (knowledge sidecar parameters).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Custom modes can be loaded from YAML files in `.engram/modes/`.
+#[derive(Debug, Clone)]
 pub enum Mode {
     Explore,
     Edit,
     Plan,
     Onboard,
     Benchmark,
+    /// A custom mode loaded from a YAML definition.
+    Custom {
+        name: String,
+        behavior: ModeBehavior,
+    },
+}
+
+impl PartialEq for Mode {
+    fn eq(&self, other: &Self) -> bool {
+        self.name() == other.name()
+    }
+}
+
+impl Eq for Mode {}
+
+impl Hash for Mode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
 }
 
 impl Mode {
-    /// Parse a mode name string into a Mode enum variant.
-    /// Returns None for unknown mode names.
+    /// Parse a mode name string into a built-in Mode enum variant.
+    /// Returns None for unknown mode names. Use `from_name_or_custom` to also check custom definitions.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "explore" => Some(Mode::Explore),
@@ -36,14 +58,26 @@ impl Mode {
         }
     }
 
+    /// Parse a mode name, checking custom definitions first (custom wins on conflict).
+    pub fn from_name_or_custom(name: &str, custom_defs: &CustomDefinitions) -> Option<Self> {
+        if let Some(def) = custom_defs.find_mode(name) {
+            return Some(Mode::Custom {
+                name: def.name.clone(),
+                behavior: def.to_behavior(),
+            });
+        }
+        Self::from_name(name)
+    }
+
     /// Return the string name of this mode.
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Mode::Explore => "explore",
             Mode::Edit => "edit",
             Mode::Plan => "plan",
             Mode::Onboard => "onboard",
             Mode::Benchmark => "benchmark",
+            Mode::Custom { name, .. } => name,
         }
     }
 
@@ -80,6 +114,7 @@ impl Mode {
                 boost_decisions: 0.0,
                 boost_patterns: 0.0,
             },
+            Mode::Custom { behavior, .. } => behavior.clone(),
         }
     }
 }
@@ -171,7 +206,8 @@ impl ModeTracker {
 }
 
 /// Built-in contexts that control which MCP tools are exposed to the client.
-#[derive(Debug, Clone, PartialEq)]
+/// Custom contexts can be loaded from YAML files in `.engram/contexts/`.
+#[derive(Debug, Clone)]
 pub enum Context {
     /// All tools exposed (default).
     Default,
@@ -183,21 +219,31 @@ pub enum Context {
     Ci,
     /// IDE assistant — read-only search + assessment tools, no knowledge writes.
     IdeAssistant,
+    /// A custom context loaded from a YAML definition.
+    Custom(CustomContextDef),
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.name() == other.name()
+    }
 }
 
 impl Context {
     /// Return the string name of this context.
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Context::Default => "default",
             Context::ClaudeCode => "claude-code",
             Context::Cursor => "cursor",
             Context::Ci => "ci",
             Context::IdeAssistant => "ide-assistant",
+            Context::Custom(def) => &def.name,
         }
     }
 
     /// Parse a context name string into a Context enum variant.
+    /// Falls back to Default for unknown names. Use `from_name_or_custom` to also check custom definitions.
     pub fn from_name(name: &str) -> Self {
         match name {
             "claude-code" => Context::ClaudeCode,
@@ -208,45 +254,60 @@ impl Context {
         }
     }
 
+    /// Parse a context name, checking custom definitions first (custom wins on conflict).
+    pub fn from_name_or_custom(name: &str, custom_defs: &CustomDefinitions) -> Self {
+        if let Some(def) = custom_defs.find_context(name) {
+            return Context::Custom(def.clone());
+        }
+        Self::from_name(name)
+    }
+
+    /// All tool names that exist in the default (full) set.
+    fn all_tool_names() -> HashSet<&'static str> {
+        HashSet::from([
+            "engram_search",
+            "engram_lookup",
+            "engram_status",
+            "engram_record_decision",
+            "engram_record_lesson",
+            "engram_record_pattern",
+            "engram_record_glossary",
+            "engram_snapshot",
+            "engram_onboard",
+            "engram_assess_context",
+            "engram_check_staleness",
+            "engram_graph",
+            "engram_related",
+            "engram_sync",
+            "engram_switch_mode",
+            "engram_get_config",
+        ])
+    }
+
     /// Return the set of tool names allowed for this context.
-    pub fn allowed_tools(&self) -> HashSet<&'static str> {
+    pub fn allowed_tools(&self) -> HashSet<String> {
         match self {
-            Context::Default | Context::ClaudeCode => HashSet::from([
-                "engram_search",
-                "engram_lookup",
-                "engram_status",
-                "engram_record_decision",
-                "engram_record_lesson",
-                "engram_record_pattern",
-                "engram_record_glossary",
-                "engram_snapshot",
-                "engram_onboard",
-                "engram_assess_context",
-                "engram_check_staleness",
-                "engram_graph",
-                "engram_related",
-                "engram_sync",
-                "engram_switch_mode",
-                "engram_get_config",
-            ]),
-            Context::Cursor | Context::IdeAssistant => HashSet::from([
-                "engram_search",
-                "engram_lookup",
-                "engram_status",
-                "engram_related",
-                "engram_graph",
-                "engram_assess_context",
-                "engram_check_staleness",
-                "engram_switch_mode",
-                "engram_get_config",
-            ]),
-            Context::Ci => HashSet::from([
-                "engram_search",
-                "engram_lookup",
-                "engram_status",
-                "engram_switch_mode",
-                "engram_get_config",
-            ]),
+            Context::Default | Context::ClaudeCode => {
+                Self::all_tool_names().into_iter().map(String::from).collect()
+            }
+            Context::Cursor | Context::IdeAssistant => {
+                ["engram_search", "engram_lookup", "engram_status",
+                 "engram_related", "engram_graph", "engram_assess_context",
+                 "engram_check_staleness", "engram_switch_mode", "engram_get_config"]
+                    .into_iter().map(String::from).collect()
+            }
+            Context::Ci => {
+                ["engram_search", "engram_lookup", "engram_status",
+                 "engram_switch_mode", "engram_get_config"]
+                    .into_iter().map(String::from).collect()
+            }
+            Context::Custom(def) => {
+                let mut tools: HashSet<String> = Self::all_tool_names().into_iter().map(String::from).collect();
+                for excluded in &def.tools.exclude {
+                    tools.remove(excluded.as_str());
+                }
+                tools
+            }
         }
     }
 }
@@ -335,6 +396,8 @@ pub struct EngineState {
     pub graph: SymbolGraph,
     /// Active mode tracker for dynamic mode switching.
     modes: ModeTracker,
+    /// Custom context and mode definitions loaded from YAML files.
+    pub custom_definitions: CustomDefinitions,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -371,6 +434,7 @@ impl McpServer {
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
                 modes: ModeTracker::new(),
+                custom_definitions: CustomDefinitions::default(),
             }),
             context: Context::Default,
         }
@@ -393,6 +457,7 @@ impl McpServer {
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
                 modes: ModeTracker::new(),
+                custom_definitions: CustomDefinitions::default(),
             }),
             context: Context::Default,
         }
@@ -423,6 +488,14 @@ impl McpServer {
             state.boot_time_ms = boot_time_ms;
             state.store_path = store_path;
             state.cache_status = cache_status;
+        }
+    }
+
+    /// Load custom context and mode definitions from YAML files in the store.
+    /// Scans `.engram/contexts/` and `.engram/modes/` directories under store_path.
+    pub fn load_custom_definitions(&mut self, custom_defs: CustomDefinitions) {
+        if let Some(ref mut state) = self.state {
+            state.custom_definitions = custom_defs;
         }
     }
 
@@ -2200,21 +2273,27 @@ async fn handle_engram_switch_mode(
     };
 
     let mut modes = Vec::new();
+    let custom_mode_names: Vec<String> = state.custom_definitions.modes.iter().map(|m| m.name.clone()).collect();
     for name_val in mode_names {
         let name = match name_val.as_str() {
             Some(n) => n,
             None => return tool_error_response(request, "Each mode must be a string"),
         };
-        match Mode::from_name(name) {
+        match Mode::from_name_or_custom(name, &state.custom_definitions) {
             Some(mode) => modes.push(mode),
             None => {
+                let mut valid: Vec<&str> = vec!["explore", "edit", "plan", "onboard", "benchmark"];
+                for cn in &custom_mode_names {
+                    valid.push(cn);
+                }
                 return tool_error_response(
                     request,
                     &format!(
-                        "Unknown mode '{}'. Valid modes: explore, edit, plan, onboard, benchmark",
-                        name
+                        "Unknown mode '{}'. Valid modes: {}",
+                        name,
+                        valid.join(", ")
                     ),
-                )
+                );
             }
         }
     }
@@ -2225,7 +2304,7 @@ async fn handle_engram_switch_mode(
 
     state.modes.set_modes(modes);
 
-    let active_modes: Vec<&str> = state.modes.active_modes().iter().map(|m| m.name()).collect();
+    let active_modes: Vec<String> = state.modes.active_modes().iter().map(|m| m.name().to_string()).collect();
     let behavior = state.modes.merged_behavior();
 
     let response_data = json!({
@@ -2255,15 +2334,15 @@ async fn handle_engram_get_config(
     state: Option<&EngineState>,
     context: &Context,
 ) -> JsonRpcResponse {
-    let allowed_tools: Vec<&str> = {
-        let mut tools: Vec<&str> = context.allowed_tools().into_iter().collect();
+    let allowed_tools: Vec<String> = {
+        let mut tools: Vec<String> = context.allowed_tools().into_iter().collect();
         tools.sort();
         tools
     };
 
     let (active_modes, search_config, embedding_provider) = match state {
         Some(s) => {
-            let modes: Vec<&str> = s.modes.active_modes().iter().map(|m| m.name()).collect();
+            let modes: Vec<String> = s.modes.active_modes().iter().map(|m| m.name().to_string()).collect();
             let behavior = s.modes.merged_behavior();
             let search = json!({
                 "knowledge_top_k": behavior.knowledge_top_k,
@@ -5717,5 +5796,286 @@ mod tests {
         assert_eq!(Context::Cursor.name(), "cursor");
         assert_eq!(Context::Ci.name(), "ci");
         assert_eq!(Context::IdeAssistant.name(), "ide-assistant");
+    }
+
+    // ---- Custom context and mode tests ----
+
+    #[test]
+    fn test_custom_context_from_yaml() {
+        let yaml = r#"
+name: review
+description: Code review context
+tools:
+  exclude:
+    - engram_onboard
+    - engram_sync
+    - engram_snapshot
+search:
+  compact_by_default: true
+  knowledge_sidecar: false
+"#;
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str(yaml).unwrap();
+        let ctx = Context::Custom(def);
+        assert_eq!(ctx.name(), "review");
+        let allowed = ctx.allowed_tools();
+        assert!(allowed.contains("engram_search"));
+        assert!(allowed.contains("engram_switch_mode"));
+        assert!(!allowed.contains("engram_onboard"));
+        assert!(!allowed.contains("engram_sync"));
+        assert!(!allowed.contains("engram_snapshot"));
+    }
+
+    #[test]
+    fn test_custom_context_allowed_tools_excludes_specified() {
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str(
+            "name: minimal\ntools:\n  exclude:\n    - engram_record_decision\n    - engram_record_lesson\n    - engram_record_pattern\n    - engram_record_glossary\n    - engram_snapshot\n    - engram_onboard\n    - engram_sync\n"
+        ).unwrap();
+        let ctx = Context::Custom(def);
+        let allowed = ctx.allowed_tools();
+        // Should have all tools minus 7 excluded = 9
+        assert_eq!(allowed.len(), 9);
+        assert!(allowed.contains("engram_search"));
+        assert!(allowed.contains("engram_lookup"));
+        assert!(allowed.contains("engram_status"));
+        assert!(allowed.contains("engram_switch_mode"));
+        assert!(allowed.contains("engram_get_config"));
+    }
+
+    #[test]
+    fn test_custom_context_no_excludes_gives_all_tools() {
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str("name: full\n").unwrap();
+        let ctx = Context::Custom(def);
+        let allowed = ctx.allowed_tools();
+        assert_eq!(allowed.len(), 16);
+    }
+
+    #[test]
+    fn test_custom_context_equality() {
+        let def1: crate::custom::CustomContextDef = serde_yaml::from_str("name: test\n").unwrap();
+        let def2: crate::custom::CustomContextDef = serde_yaml::from_str("name: test\n").unwrap();
+        assert_eq!(Context::Custom(def1), Context::Custom(def2));
+    }
+
+    #[test]
+    fn test_custom_mode_behavior() {
+        let yaml = r#"
+name: focus
+search:
+  knowledge:
+    top_k: 2
+    min_relevance: 0.9
+    boost_decisions: 0.5
+    boost_patterns: 0.5
+"#;
+        let def: crate::custom::CustomModeDef = serde_yaml::from_str(yaml).unwrap();
+        let mode = Mode::Custom {
+            name: def.name.clone(),
+            behavior: def.to_behavior(),
+        };
+        assert_eq!(mode.name(), "focus");
+        let b = mode.behavior();
+        assert_eq!(b.knowledge_top_k, 2);
+        assert!((b.min_relevance - 0.9).abs() < f64::EPSILON);
+        assert!((b.boost_decisions - 0.5).abs() < f64::EPSILON);
+        assert!((b.boost_patterns - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_custom_mode_in_tracker() {
+        let tracker = ModeTracker::new();
+        let mode = Mode::Custom {
+            name: "focus".to_string(),
+            behavior: ModeBehavior {
+                knowledge_top_k: 2,
+                min_relevance: 0.9,
+                boost_decisions: 0.5,
+                boost_patterns: 0.5,
+            },
+        };
+        tracker.set_modes(vec![mode]);
+        let active = tracker.active_modes();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name(), "focus");
+    }
+
+    #[test]
+    fn test_custom_mode_merged_with_builtin() {
+        let tracker = ModeTracker::new();
+        let custom = Mode::Custom {
+            name: "deep".to_string(),
+            behavior: ModeBehavior {
+                knowledge_top_k: 20,
+                min_relevance: 0.3,
+                boost_decisions: 2.0,
+                boost_patterns: 1.0,
+            },
+        };
+        tracker.set_modes(vec![Mode::Edit, custom]);
+        let b = tracker.merged_behavior();
+        // Max top_k: 20 (custom) vs 3 (edit) = 20
+        assert_eq!(b.knowledge_top_k, 20);
+        // Min min_relevance: 0.3 (custom) vs 0.7 (edit) = 0.3
+        assert!((b.min_relevance - 0.3).abs() < f64::EPSILON);
+        // Max boost_decisions: 2.0 (custom) vs 1.2 (edit) = 2.0
+        assert!((b.boost_decisions - 2.0).abs() < f64::EPSILON);
+        // Max boost_patterns: 1.0 (custom) vs 1.3 (edit) = 1.3
+        assert!((b.boost_patterns - 1.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_from_name_or_custom_context_custom_wins() {
+        let mut defs = CustomDefinitions::default();
+        defs.contexts.push(
+            serde_yaml::from_str("name: ci\ndescription: Custom CI\ntools:\n  exclude:\n    - engram_status\n").unwrap(),
+        );
+        // Custom "ci" should win over built-in Ci
+        let ctx = Context::from_name_or_custom("ci", &defs);
+        assert!(matches!(ctx, Context::Custom(_)));
+        assert_eq!(ctx.name(), "ci");
+        // Custom CI excludes engram_status unlike built-in
+        let allowed = ctx.allowed_tools();
+        assert!(!allowed.contains("engram_status"));
+    }
+
+    #[test]
+    fn test_from_name_or_custom_context_falls_back_to_builtin() {
+        let defs = CustomDefinitions::default();
+        let ctx = Context::from_name_or_custom("cursor", &defs);
+        assert_eq!(ctx, Context::Cursor);
+    }
+
+    #[test]
+    fn test_from_name_or_custom_mode_custom_wins() {
+        let mut defs = CustomDefinitions::default();
+        defs.modes.push(
+            serde_yaml::from_str("name: explore\nsearch:\n  knowledge:\n    top_k: 99\n").unwrap(),
+        );
+        // Custom "explore" should win over built-in Explore
+        let mode = Mode::from_name_or_custom("explore", &defs).unwrap();
+        assert!(matches!(mode, Mode::Custom { .. }));
+        assert_eq!(mode.behavior().knowledge_top_k, 99);
+    }
+
+    #[test]
+    fn test_from_name_or_custom_mode_falls_back_to_builtin() {
+        let defs = CustomDefinitions::default();
+        let mode = Mode::from_name_or_custom("edit", &defs).unwrap();
+        assert_eq!(mode, Mode::Edit);
+    }
+
+    #[test]
+    fn test_from_name_or_custom_mode_unknown_returns_none() {
+        let defs = CustomDefinitions::default();
+        assert!(Mode::from_name_or_custom("nonexistent", &defs).is_none());
+    }
+
+    #[test]
+    fn test_custom_context_on_server() {
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str(
+            "name: my-project\ntools:\n  exclude:\n    - engram_sync\n"
+        ).unwrap();
+        let mut server = McpServer::new();
+        server.set_context(Context::Custom(def));
+        // Just verify it constructs without panic
+        drop(server);
+    }
+
+    #[test]
+    fn test_load_custom_definitions_on_engine() {
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+        let mut defs = CustomDefinitions::default();
+        defs.modes.push(serde_yaml::from_str("name: sprint\n").unwrap());
+        server.load_custom_definitions(defs);
+        // Just verify it sets without panic
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_accepts_custom_mode() {
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+        let mut defs = CustomDefinitions::default();
+        defs.modes.push(
+            serde_yaml::from_str("name: sprint\nsearch:\n  knowledge:\n    top_k: 15\n").unwrap(),
+        );
+        server.load_custom_definitions(defs);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {"modes": ["sprint"]}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(data["active_modes"].as_array().unwrap().contains(&json!("sprint")));
+        assert_eq!(data["behavior_changes"]["knowledge_top_k"], 15);
+    }
+
+    #[tokio::test]
+    async fn test_custom_context_filters_tools_in_tools_list() {
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str(
+            "name: review\ntools:\n  exclude:\n    - engram_onboard\n    - engram_sync\n    - engram_snapshot\n"
+        ).unwrap();
+
+        let input = make_request(1, "tools/list", None);
+        let mut server = McpServer::new();
+        server.set_context(Context::Custom(def));
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        // 16 total minus 3 excluded = 13
+        assert_eq!(tools.len(), 13);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_search"));
+        assert!(!names.contains(&"engram_onboard"));
+        assert!(!names.contains(&"engram_sync"));
+        assert!(!names.contains(&"engram_snapshot"));
+    }
+
+    #[tokio::test]
+    async fn test_get_config_shows_custom_context_name() {
+        let def: crate::custom::CustomContextDef = serde_yaml::from_str("name: my-ctx\n").unwrap();
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+        server.set_context(Context::Custom(def));
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_get_config", "arguments": {}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let result = responses[0].result.as_ref().unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(data["context"], "my-ctx");
     }
 }
