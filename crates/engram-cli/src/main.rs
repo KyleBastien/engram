@@ -5,7 +5,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use engram_core::{EmbeddingProvider, SourceConfig, StoreConfig};
+use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
 use engram_mcp::McpServer;
 use engram_query::IndexManager;
@@ -24,6 +24,23 @@ struct Cli {
 enum Transport {
     Stdio,
     Sse,
+}
+
+#[derive(Clone, ValueEnum)]
+enum DepthArg {
+    Quick,
+    Standard,
+    Deep,
+}
+
+impl From<DepthArg> for OnboardingDepth {
+    fn from(d: DepthArg) -> Self {
+        match d {
+            DepthArg::Quick => OnboardingDepth::Quick,
+            DepthArg::Standard => OnboardingDepth::Standard,
+            DepthArg::Deep => OnboardingDepth::Deep,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -60,6 +77,21 @@ enum Commands {
 
     /// Check store health and index status
     Status {
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
+    /// Run onboarding analysis on a source repository
+    Onboard {
+        /// Analysis depth (quick, standard, or deep)
+        #[arg(long, default_value = "standard")]
+        depth: DepthArg,
+
+        /// Only onboard this source repo (defaults to the first configured source)
+        #[arg(long)]
+        repo: Option<String>,
+
         /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
         path: PathBuf,
@@ -319,6 +351,77 @@ async fn main() {
                 }
             }
         }
+        Commands::Onboard { depth, repo, path } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            let config = match load_config(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let source = if let Some(ref repo_name) = repo {
+                match config.sources.iter().find(|s| s.name == *repo_name) {
+                    Some(s) => s.clone(),
+                    None => {
+                        eprintln!("Error: source repo '{repo_name}' not found in config");
+                        process::exit(1);
+                    }
+                }
+            } else if let Some(s) = config.sources.first() {
+                s.clone()
+            } else {
+                eprintln!("Error: no source repos configured in engram.config.yaml");
+                process::exit(1);
+            };
+
+            let onboarding_depth: OnboardingDepth = depth.into();
+            let repo_path = PathBuf::from(&source.path);
+
+            println!("Onboarding '{}' (depth: {onboarding_depth})...", source.name);
+            println!("  [1/4] Detecting project metadata...");
+
+            let start = Instant::now();
+            match engram_ingest::run_onboarding(&repo_path, &path, &source, onboarding_depth).await
+            {
+                Ok(report) => {
+                    let elapsed = start.elapsed();
+                    if report.metadata_detected {
+                        println!("  [2/4] Extracting build/test commands...");
+                    }
+                    if report.architecture_analyzed {
+                        println!("  [3/4] Analyzing directory structure...");
+                    }
+                    if report.abstractions_extracted {
+                        println!("  [4/4] Extracting key abstractions...");
+                    }
+
+                    println!("\nOnboarding complete ({:.1}s):", elapsed.as_secs_f64());
+                    println!("  Depth:          {}", report.depth);
+                    println!("  Metadata:       {}", if report.metadata_detected { "detected" } else { "skipped" });
+                    println!("  Commands:       {}", if report.commands_extracted { "extracted" } else { "skipped" });
+                    println!("  Architecture:   {}", if report.architecture_analyzed { "analyzed" } else { "skipped" });
+                    println!("  Abstractions:   {}", if report.abstractions_extracted { "extracted" } else { "skipped" });
+                    println!("  Files written:  {}", report.files_written.len());
+                    for f in &report.files_written {
+                        println!("    - {f}");
+                    }
+                    if let Some(ref hash) = report.commit_hash {
+                        println!("  Commit:         {}", &hash[..8.min(hash.len())]);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: onboarding failed: {e}");
+                    process::exit(1);
+                }
+            }
+        }
         Commands::Reindex {
             full,
             incremental: _,
@@ -393,7 +496,7 @@ mod tests {
     use engram_core::Manifest;
     use engram_store::{read_manifest, write_manifest};
 
-    use super::{load_config, run_reindex, Cli, Commands, Transport};
+    use super::{load_config, run_reindex, Cli, Commands, DepthArg, Transport};
 
     // --- Mock embedding provider for tests ---
 
@@ -1037,5 +1140,160 @@ mod tests {
         // Verify: indexed commit matches HEAD — should be "up to date"
         let read = read_manifest(&store_path).unwrap().unwrap();
         assert_eq!(read.last_indexed_commit.as_deref(), Some(head_oid.as_str()));
+    }
+
+    // --- Onboard command tests ---
+
+    #[test]
+    fn test_onboard_default_depth() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "onboard"]);
+        match cli.command {
+            Commands::Onboard { depth, repo, path } => {
+                assert!(matches!(depth, DepthArg::Standard));
+                assert!(repo.is_none());
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_quick_depth() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "onboard", "--depth", "quick"]);
+        match cli.command {
+            Commands::Onboard { depth, .. } => {
+                assert!(matches!(depth, DepthArg::Quick));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_deep_depth() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "onboard", "--depth", "deep"]);
+        match cli.command {
+            Commands::Onboard { depth, .. } => {
+                assert!(matches!(depth, DepthArg::Deep));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_repo_flag() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "onboard", "--repo", "my-project"]);
+        match cli.command {
+            Commands::Onboard { repo, .. } => {
+                assert_eq!(repo, Some("my-project".to_string()));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "onboard", "--path", "/tmp/my-store"]);
+        match cli.command {
+            Commands::Onboard { path, .. } => {
+                assert_eq!(path, PathBuf::from("/tmp/my-store"));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_all_flags() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "onboard",
+            "--depth",
+            "quick",
+            "--repo",
+            "my-repo",
+            "--path",
+            "/tmp/store",
+        ]);
+        match cli.command {
+            Commands::Onboard { depth, repo, path } => {
+                assert!(matches!(depth, DepthArg::Quick));
+                assert_eq!(repo, Some("my-repo".to_string()));
+                assert_eq!(path, PathBuf::from("/tmp/store"));
+            }
+            _ => panic!("expected Onboard command"),
+        }
+    }
+
+    #[test]
+    fn test_onboard_depth_arg_converts_to_onboarding_depth() {
+        use engram_core::OnboardingDepth;
+        assert_eq!(OnboardingDepth::from(DepthArg::Quick), OnboardingDepth::Quick);
+        assert_eq!(OnboardingDepth::from(DepthArg::Standard), OnboardingDepth::Standard);
+        assert_eq!(OnboardingDepth::from(DepthArg::Deep), OnboardingDepth::Deep);
+    }
+
+    #[tokio::test]
+    async fn test_onboard_runs_pipeline() {
+        let (_src, src_path) = setup_source_repo(&[
+            ("Cargo.toml", "[package]\nname = \"test\"\nversion = \"0.1.0\"\nedition = \"2021\""),
+            ("src/main.rs", "fn main() {\n    println!(\"hello\");\n}"),
+        ]);
+        let source = SourceConfig {
+            name: "test-repo".to_string(),
+            path: src_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        };
+        let (_dir, store_path) = init_store_with_sources(vec![source.clone()]);
+
+        let report = engram_ingest::run_onboarding(
+            &src_path,
+            &store_path,
+            &source,
+            engram_core::OnboardingDepth::Quick,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.metadata_detected);
+        assert!(report.commands_extracted);
+        assert!(!report.architecture_analyzed);
+        assert!(!report.abstractions_extracted);
+        assert_eq!(report.files_written.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_onboard_standard_depth_full_analysis() {
+        let (_src, src_path) = setup_source_repo(&[
+            ("Cargo.toml", "[package]\nname = \"test\"\nversion = \"0.1.0\"\nedition = \"2021\""),
+            ("src/main.rs", "fn main() {\n    println!(\"hello\");\n}"),
+        ]);
+        let source = SourceConfig {
+            name: "test-repo".to_string(),
+            path: src_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        };
+        let (_dir, store_path) = init_store_with_sources(vec![source.clone()]);
+
+        let report = engram_ingest::run_onboarding(
+            &src_path,
+            &store_path,
+            &source,
+            engram_core::OnboardingDepth::Standard,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.metadata_detected);
+        assert!(report.commands_extracted);
+        assert!(report.architecture_analyzed);
+        assert!(report.abstractions_extracted);
+        assert_eq!(report.files_written.len(), 4);
     }
 }
