@@ -1,3 +1,4 @@
+mod architecture;
 mod chunker;
 mod commands;
 mod detect;
@@ -8,6 +9,7 @@ mod metadata;
 mod pipeline;
 mod sliding;
 
+pub use architecture::analyze_directory_structure;
 pub use chunker::{Language, RawChunk, TreeSitterChunker};
 pub use commands::extract_build_commands;
 pub use detect::{detect_language, ChunkerKind};
