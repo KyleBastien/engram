@@ -1465,3 +1465,12 @@ Started: 03/09/2026 17:15:47
   - uuid v1 with "v4" feature for session ID generation (no "serde" feature needed if not serializing UUIDs)
   - Custom ISO 8601 timestamp without chrono dependency using Howard Hinnant's date algorithm
 ---
+
+## 2026-03-10 - US-084
+- Already implemented in US-083 — `compute_metrics(events, session) -> BenchmarkReport` is public in engram-bench/src/lib.rs
+- Computes all required metrics: token_efficiency, retrieval_precision, time_to_first_edit_ms, file_read_count, search_to_read_ratio, context_waste_tokens
+- All 9 engram-bench tests pass, clippy clean
+- No code changes needed — just marked as passing
+- **Learnings for future iterations:**
+  - Stories may be satisfied by prior implementation — always check existing code before writing new code
+---
