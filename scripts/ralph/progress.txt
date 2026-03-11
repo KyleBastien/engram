@@ -2,6 +2,9 @@
 Started: 03/09/2026 17:15:47
 
 ## Codebase Patterns
+- axum nest() strips the prefix from request URIs; static_handler must trim leading `/` after `trim_start_matches("/dashboard/")` for asset lookup
+- New REST API endpoints: add route in `build_router_with_state()`, add handler fn, add data to `DashboardState` behind `Arc<RwLock<T>>`
+- Dashboard HTML views follow pattern: nav links across all pages, loading/error states, IIFE wrapper, fetch+setInterval(30s) for REST data
 - serde (v1, with "derive" feature) and serde_json (v1) are dependencies of engram-core for serialization
 - serde_json v1 is also a direct dependency of engram-ingest (for package.json parsing in commands.rs)
 - Use `#[serde(rename_all = "snake_case")]` on enums for consistent JSON field naming
@@ -1586,4 +1589,25 @@ Started: 03/09/2026 17:15:47
   - Health data is snapshotted at boot time — for live updates, the shared `Arc<RwLock<>>` allows MCP server to push updates
   - `build_router_with_events()` is now a thin wrapper around `build_router_with_state()` for backwards compat
   - Cache size calculation walks `.engram-cache/` directory — a simple first-level read_dir sum
+---
+
+## 2026-03-10 - US-091
+- Implemented Knowledge Activity View dashboard page with REST API endpoint
+- Added `KnowledgeSnapshot`, `KnowledgeWriteback`, `OnboardingStatus` data types
+- Added `/api/knowledge` REST endpoint returning JSON knowledge data
+- Created `knowledge.html` with three panels: Items by Category (bar chart), Onboarding Status (table), Recent Write-Backs (table with kind badges)
+- Added `knowledge` field to `DashboardState` with `with_knowledge()` constructor
+- Updated navigation links in index.html and health.html to include Knowledge page
+- Fixed static file serving bug: axum nest() strips prefix, so `static_handler` must also trim leading `/` for asset lookup
+- 5 new tests: knowledge_snapshot_default, knowledge_api_returns_json, embedded_assets_contain_knowledge, knowledge_html_served
+- Files changed:
+  - crates/engram-dashboard/src/lib.rs (KnowledgeSnapshot types, /api/knowledge handler, DashboardState.knowledge field, tests)
+  - crates/engram-dashboard/src/assets/knowledge.html (new - knowledge activity view page)
+  - crates/engram-dashboard/src/assets/index.html (navigation links)
+  - crates/engram-dashboard/src/assets/health.html (navigation links)
+- **Learnings for future iterations:**
+  - axum nest() strips the matched prefix from URIs — `static_handler` receives `/file.html` not `/dashboard/file.html`, so must trim leading `/` for rust-embed lookup
+  - `DashboardState` pattern extends well: add new `Arc<RwLock<T>>` field, add `with_*` constructor, add route+handler
+  - Dashboard HTML views use consistent pattern: nav with `class="active"` on current page, loading/error/main-grid toggle, fetch+setInterval for REST data
+  - Kind badges (decision=blue, lesson=green, pattern=purple, glossary=yellow) follow color conventions from existing dashboard styling
 ---
