@@ -99,6 +99,7 @@ Started: 03/09/2026 17:15:47
 - tokio::sync::broadcast for multi-subscriber event fan-out; `broadcast::channel(capacity)` returns `(Sender, Receiver)`
 - EventBroadcaster (engram-dashboard) wraps broadcast::Sender<DashboardEvent>; clone and share between MCP server and dashboard
 - DashboardEvent uses `#[serde(tag = "type", rename_all = "snake_case")]` for JSON events with `type` field
+- axum 0.7 path parameters use `:param` syntax (not `{param}` which is axum 0.8+)
 - tokio-tungstenite v0.24 + futures-util v0.3 for WebSocket client in tests (dev-dependencies)
 
 ---
@@ -1636,7 +1637,23 @@ Started: 03/09/2026 17:15:47
 - Added 4 new tests: benchmark_snapshot_default_empty, benchmarks_api_returns_json, embedded_assets_contain_benchmark, benchmark_html_served (28 total tests pass)
 - Files changed: crates/engram-dashboard/src/lib.rs, crates/engram-dashboard/src/assets/benchmark.html (new), crates/engram-dashboard/src/assets/index.html, crates/engram-dashboard/src/assets/health.html, crates/engram-dashboard/src/assets/knowledge.html, crates/engram-dashboard/src/assets/search.html
 - **Learnings for future iterations:**
-  - DashboardState now has 4 data fields (health, knowledge, search_analytics, benchmarks) — all follow Arc<RwLock<Snapshot>> pattern
+  - DashboardState now has 5 data fields (health, knowledge, search_analytics, benchmarks, sessions) — all follow Arc<RwLock<Snapshot>> pattern
   - index.html nav uses inline styles; health/knowledge/search/benchmark use CSS class-based nav — must update both styles when adding nav links
   - Benchmark detail panel uses onclick with session_id to look up run data from the allRuns array stored in closure scope
+---
+
+## 2026-03-10 - US-094
+- Implemented REST API endpoints for dashboard data
+- Added GET /api/status returning HealthSnapshot (index health data)
+- Added GET /api/benchmarks/:session_id returning detailed BenchmarkRunSummary for a specific session (404 if not found)
+- Added GET /api/sessions returning SessionsSnapshot with active MCP sessions
+- Added SessionInfo and SessionsSnapshot types; added sessions: Arc<RwLock<SessionsSnapshot>> to DashboardState
+- Existing endpoints already satisfied: GET /api/knowledge, GET /api/benchmarks, GET /api/health, GET /api/search_analytics
+- Added 7 new tests: status_api_returns_health_data, benchmark_detail_returns_specific_run, benchmark_detail_not_found, benchmark_detail_finds_active_session, sessions_api_returns_json, sessions_snapshot_default_empty (34 total tests pass)
+- Files changed: crates/engram-dashboard/src/lib.rs
+- **Learnings for future iterations:**
+  - axum 0.7 uses `:param` path syntax — `{param}` is axum 0.8+ only
+  - Path<T> extractor must come before State<T> in handler parameter order for axum to extract correctly
+  - DashboardState now has 5 data fields: health, knowledge, search_analytics, benchmarks, sessions
+  - For 404 responses with JSON body, return `(StatusCode::NOT_FOUND, Json(json!({...}))).into_response()` with explicit Response return type
 ---
