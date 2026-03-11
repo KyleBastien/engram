@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
@@ -181,6 +181,22 @@ pub struct BenchmarkSnapshot {
     pub token_savings_trend: Vec<TokenSavingsPoint>,
 }
 
+/// Active MCP session info.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionInfo {
+    pub client_name: String,
+    pub connected_at: String,
+    pub queries: usize,
+    pub knowledge_writes: usize,
+}
+
+/// Snapshot of active sessions served via REST API.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionsSnapshot {
+    pub active: Vec<SessionInfo>,
+    pub total_connected: usize,
+}
+
 /// Snapshot of index health data served via REST API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthSnapshot {
@@ -193,7 +209,7 @@ pub struct HealthSnapshot {
     pub store_path: String,
 }
 
-/// Shared state for the dashboard: event broadcaster + health data + knowledge data + search analytics + benchmarks.
+/// Shared state for the dashboard: event broadcaster + health data + knowledge data + search analytics + benchmarks + sessions.
 #[derive(Clone)]
 pub struct DashboardState {
     pub broadcaster: EventBroadcaster,
@@ -201,6 +217,7 @@ pub struct DashboardState {
     pub knowledge: Arc<RwLock<KnowledgeSnapshot>>,
     pub search_analytics: Arc<RwLock<SearchAnalyticsSnapshot>>,
     pub benchmarks: Arc<RwLock<BenchmarkSnapshot>>,
+    pub sessions: Arc<RwLock<SessionsSnapshot>>,
 }
 
 impl DashboardState {
@@ -211,6 +228,7 @@ impl DashboardState {
             knowledge: Arc::new(RwLock::new(KnowledgeSnapshot::default())),
             search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
             benchmarks: Arc::new(RwLock::new(BenchmarkSnapshot::default())),
+            sessions: Arc::new(RwLock::new(SessionsSnapshot::default())),
         }
     }
 
@@ -225,6 +243,7 @@ impl DashboardState {
             knowledge: Arc::new(RwLock::new(knowledge)),
             search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
             benchmarks: Arc::new(RwLock::new(BenchmarkSnapshot::default())),
+            sessions: Arc::new(RwLock::new(SessionsSnapshot::default())),
         }
     }
 }
@@ -289,6 +308,9 @@ pub fn build_router_with_state(state: DashboardState) -> Router {
         .route("/api/knowledge", get(knowledge_handler))
         .route("/api/search_analytics", get(search_analytics_handler))
         .route("/api/benchmarks", get(benchmarks_handler))
+        .route("/api/benchmarks/:session_id", get(benchmark_detail_handler))
+        .route("/api/status", get(status_handler))
+        .route("/api/sessions", get(sessions_handler))
         .nest("/dashboard", dashboard_routes)
         .with_state(shared)
 }
@@ -326,6 +348,36 @@ async fn benchmarks_handler(
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
     let snapshot = state.benchmarks.read().await;
+    Json(snapshot.clone())
+}
+
+async fn benchmark_detail_handler(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<DashboardState>>,
+) -> Response {
+    let snapshot = state.benchmarks.read().await;
+    let run = snapshot
+        .active_sessions
+        .iter()
+        .chain(snapshot.historical_runs.iter())
+        .find(|r| r.session_id == session_id);
+    match run {
+        Some(r) => Json(r.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "session not found"}))).into_response(),
+    }
+}
+
+async fn status_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.health.read().await;
+    Json(snapshot.clone())
+}
+
+async fn sessions_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.sessions.read().await;
     Json(snapshot.clone())
 }
 
@@ -964,5 +1016,172 @@ mod tests {
         assert!(body.contains("Benchmark Dashboard"));
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_status_api_returns_health_data() {
+        let health = HealthSnapshot {
+            total_chunks: 200,
+            repos: vec![RepoHealth {
+                name: "status-repo".to_string(),
+                chunk_count: 200,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state = DashboardState::new(EventBroadcaster::default(), health);
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["total_chunks"], 200);
+        assert_eq!(body["repos"][0]["name"], "status-repo");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_detail_returns_specific_run() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        {
+            let mut benchmarks = state.benchmarks.write().await;
+            benchmarks.historical_runs = vec![
+                BenchmarkRunSummary {
+                    session_id: "sess-abc".to_string(),
+                    task: "Implement feature X".to_string(),
+                    started_at: "2026-03-10T10:00:00Z".to_string(),
+                    status: "complete".to_string(),
+                    baseline_tokens: 8000,
+                    assisted_tokens: 5000,
+                    token_savings_pct: 37.5,
+                    duration_ms: 60000,
+                    event_count: 30,
+                },
+                BenchmarkRunSummary {
+                    session_id: "sess-def".to_string(),
+                    task: "Fix bug Y".to_string(),
+                    ..Default::default()
+                },
+            ];
+        }
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/benchmarks/sess-abc"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["session_id"], "sess-abc");
+        assert_eq!(body["task"], "Implement feature X");
+        assert_eq!(body["token_savings_pct"], 37.5);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_detail_not_found() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/benchmarks/nonexistent"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "session not found");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_detail_finds_active_session() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        {
+            let mut benchmarks = state.benchmarks.write().await;
+            benchmarks.active_sessions = vec![BenchmarkRunSummary {
+                session_id: "active-001".to_string(),
+                task: "Running task".to_string(),
+                status: "running".to_string(),
+                ..Default::default()
+            }];
+        }
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/benchmarks/active-001"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["session_id"], "active-001");
+        assert_eq!(body["status"], "running");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sessions_api_returns_json() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        {
+            let mut sessions = state.sessions.write().await;
+            sessions.active = vec![
+                SessionInfo {
+                    client_name: "claude-code".to_string(),
+                    connected_at: "2026-03-10T10:00:00Z".to_string(),
+                    queries: 15,
+                    knowledge_writes: 3,
+                },
+                SessionInfo {
+                    client_name: "cursor".to_string(),
+                    connected_at: "2026-03-10T10:05:00Z".to_string(),
+                    queries: 8,
+                    knowledge_writes: 0,
+                },
+            ];
+            sessions.total_connected = 2;
+        }
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/sessions"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["total_connected"], 2);
+        assert_eq!(body["active"].as_array().unwrap().len(), 2);
+        assert_eq!(body["active"][0]["client_name"], "claude-code");
+        assert_eq!(body["active"][0]["queries"], 15);
+        assert_eq!(body["active"][1]["client_name"], "cursor");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sessions_snapshot_default_empty() {
+        let snapshot = SessionsSnapshot::default();
+        assert!(snapshot.active.is_empty());
+        assert_eq!(snapshot.total_connected, 0);
     }
 }
