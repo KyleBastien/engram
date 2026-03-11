@@ -20,7 +20,7 @@ pub use knowledge::{Decision, GlossaryEntry, Lesson, Pattern};
 pub use manifest::Manifest;
 pub use onboarding::{
     Abstraction, ArchitectureMap, BuildTestCommands, CommandInfo, DirectoryInfo, KeyAbstractions,
-    PatternInfo, ProjectOverview,
+    OnboardingDepth, OnboardingReport, PatternInfo, ProjectOverview,
 };
 pub use snapshot::{Snapshot, SnapshotTier};
 pub use symbol::{

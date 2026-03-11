@@ -85,6 +85,43 @@ pub struct KeyAbstractions {
     pub patterns: Vec<PatternInfo>,
 }
 
+/// How deep the onboarding analysis should go.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingDepth {
+    /// Metadata + build commands (~5s)
+    Quick,
+    /// Quick + key abstractions + architecture map (~30s)
+    #[default]
+    Standard,
+    /// Standard + full symbol export analysis (~2-5min)
+    Deep,
+}
+
+impl std::fmt::Display for OnboardingDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quick => write!(f, "quick"),
+            Self::Standard => write!(f, "standard"),
+            Self::Deep => write!(f, "deep"),
+        }
+    }
+}
+
+/// Report from the onboarding pipeline.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct OnboardingReport {
+    pub depth: OnboardingDepth,
+    pub metadata_detected: bool,
+    pub commands_extracted: bool,
+    pub architecture_analyzed: bool,
+    pub abstractions_extracted: bool,
+    #[serde(default)]
+    pub files_written: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +312,71 @@ mod tests {
         let yaml = serde_yaml::to_string(&ka).expect("serialize");
         let deserialized: KeyAbstractions = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(ka, deserialized);
+    }
+
+    #[test]
+    fn onboarding_depth_default_is_standard() {
+        assert_eq!(OnboardingDepth::default(), OnboardingDepth::Standard);
+    }
+
+    #[test]
+    fn onboarding_depth_display() {
+        assert_eq!(OnboardingDepth::Quick.to_string(), "quick");
+        assert_eq!(OnboardingDepth::Standard.to_string(), "standard");
+        assert_eq!(OnboardingDepth::Deep.to_string(), "deep");
+    }
+
+    #[test]
+    fn onboarding_depth_yaml_round_trip() {
+        for depth in [
+            OnboardingDepth::Quick,
+            OnboardingDepth::Standard,
+            OnboardingDepth::Deep,
+        ] {
+            let yaml = serde_yaml::to_string(&depth).expect("serialize");
+            let deserialized: OnboardingDepth =
+                serde_yaml::from_str(&yaml).expect("deserialize");
+            assert_eq!(depth, deserialized);
+        }
+    }
+
+    #[test]
+    fn onboarding_report_yaml_round_trip() {
+        let report = OnboardingReport {
+            depth: OnboardingDepth::Standard,
+            metadata_detected: true,
+            commands_extracted: true,
+            architecture_analyzed: true,
+            abstractions_extracted: false,
+            files_written: vec![
+                "knowledge/onboarding/project-overview.yaml".to_string(),
+                "knowledge/onboarding/build-test-commands.yaml".to_string(),
+            ],
+            commit_hash: Some("abc123".to_string()),
+        };
+
+        let yaml = serde_yaml::to_string(&report).expect("serialize");
+        let deserialized: OnboardingReport =
+            serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(report, deserialized);
+    }
+
+    #[test]
+    fn onboarding_report_optional_commit_hash() {
+        let report = OnboardingReport {
+            depth: OnboardingDepth::Quick,
+            metadata_detected: true,
+            commands_extracted: true,
+            architecture_analyzed: false,
+            abstractions_extracted: false,
+            files_written: vec![],
+            commit_hash: None,
+        };
+
+        let yaml = serde_yaml::to_string(&report).expect("serialize");
+        assert!(!yaml.contains("commit_hash"));
+        let deserialized: OnboardingReport =
+            serde_yaml::from_str(&yaml).expect("deserialize");
+        assert_eq!(report, deserialized);
     }
 }

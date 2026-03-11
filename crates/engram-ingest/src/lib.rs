@@ -7,6 +7,7 @@ mod diff;
 mod hash;
 mod markdown;
 mod metadata;
+mod onboarding;
 mod pipeline;
 mod sliding;
 
@@ -19,5 +20,6 @@ pub use diff::{detect_changed_files, ChangedFiles};
 pub use hash::{content_hash, has_chunk_changed};
 pub use markdown::MarkdownChunker;
 pub use metadata::detect_project_metadata;
+pub use onboarding::run_onboarding;
 pub use pipeline::{IngestPipeline, IngestReport};
 pub use sliding::SlidingWindowChunker;

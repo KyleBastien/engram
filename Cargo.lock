@@ -446,6 +446,8 @@ dependencies = [
  "engram-store",
  "git2",
  "globset",
+ "serde_json",
+ "serde_yaml",
  "sha2",
  "tempfile",
  "tokio",
