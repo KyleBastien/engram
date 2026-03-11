@@ -1434,3 +1434,15 @@ Started: 03/09/2026 17:15:47
   - reqwest is good for SSE integration tests but SSE streaming reads may block — use timeouts
   - For SSE tests, manually inserting sessions into state is simpler than parsing SSE stream in tests
 ---
+
+## 2026-03-10 - US-082
+- Defined benchmark session and metric types in engram-core
+- Created `BenchmarkSession`, `BenchmarkEvent`, `BenchmarkReport` structs plus `BenchmarkMode` and `TaskOutcome` enums
+- All types derive Serialize, Deserialize, Debug, Clone with serde rename_all snake_case on enums
+- Optional fields (ended_at, task_outcome, notes, hit) use `#[serde(default)]` + `Option<T>` for backward compat
+- Files changed: crates/engram-core/src/benchmark.rs (new), crates/engram-core/src/lib.rs
+- **Learnings for future iterations:**
+  - Follow existing pattern of one-module-per-concept in engram-core (benchmark.rs alongside knowledge.rs, snapshot.rs, etc.)
+  - Use `#[serde(rename_all = "snake_case")]` on enums for consistent JSON serialization
+  - Use `#[serde(default)]` on optional fields so partial JSON deserialization works
+---
