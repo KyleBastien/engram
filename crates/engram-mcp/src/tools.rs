@@ -127,6 +127,34 @@ pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
             },
             "required": ["title", "description", "trigger"]
         }
+    }),
+    json!({
+        "name": "engram_record_pattern",
+        "description": "Record a code or architecture pattern to the knowledge base. Auto-generates id, contributed_by, and created_at. Writes YAML, embeds it, and commits to the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the pattern"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the pattern"
+                },
+                "examples": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of example code or usages"
+                },
+                "anti_patterns": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of anti-patterns to avoid"
+                }
+            },
+            "required": ["name", "description"]
+        }
     })]
 }
 
@@ -196,10 +224,11 @@ mod tests {
     #[test]
     fn test_knowledge_tool_definitions_count() {
         let tools = knowledge_tool_definitions();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
+        assert!(names.contains(&"engram_record_pattern"));
     }
 
     #[test]
@@ -243,5 +272,25 @@ mod tests {
         let props = lesson_tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("resolution"));
         assert!(props.contains_key("related_files"));
+    }
+
+    #[test]
+    fn test_record_pattern_has_required_params() {
+        let tools = knowledge_tool_definitions();
+        let pattern_tool = &tools[2];
+        let required = pattern_tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"name"));
+        assert!(required_names.contains(&"description"));
+        assert_eq!(required_names.len(), 2);
+    }
+
+    #[test]
+    fn test_record_pattern_has_optional_params() {
+        let tools = knowledge_tool_definitions();
+        let pattern_tool = &tools[2];
+        let props = pattern_tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("examples"));
+        assert!(props.contains_key("anti_patterns"));
     }
 }

@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, Lesson};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider, Lesson, Pattern};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
@@ -200,6 +200,7 @@ async fn handle_tools_call(
         "engram_status" => handle_engram_status(request, state).await,
         "engram_record_decision" => handle_engram_record_decision(request, state).await,
         "engram_record_lesson" => handle_engram_record_lesson(request, state).await,
+        "engram_record_pattern" => handle_engram_record_pattern(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -737,6 +738,135 @@ async fn handle_engram_record_lesson(
     )
 }
 
+async fn handle_engram_record_pattern(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    if state.store_path.is_empty() {
+        return tool_error_response(request, "Store path not configured");
+    }
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    let name = match args.and_then(|a| a.get("name")).and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return tool_error_response(request, "name parameter is required"),
+    };
+
+    let description = match args.and_then(|a| a.get("description")).and_then(|v| v.as_str()) {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => return tool_error_response(request, "description parameter is required"),
+    };
+
+    let examples: Vec<String> = args
+        .and_then(|a| a.get("examples"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let anti_patterns: Vec<String> = args
+        .and_then(|a| a.get("anti_patterns"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let pattern_id = format!("PAT-{}", uuid::Uuid::new_v4().as_simple());
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let pattern = Pattern {
+        id: pattern_id.clone(),
+        name,
+        description,
+        examples,
+        anti_patterns,
+        contributed_by: "mcp-agent".to_string(),
+        created_at,
+        embedding_ref: None,
+    };
+
+    // Get embed text and embed it
+    let embed_text = engram_store::pattern_embed_text(&pattern);
+    let embedding = match state.provider.embed(&[&embed_text]).await {
+        Ok(mut vecs) if !vecs.is_empty() => vecs.remove(0),
+        Ok(_) => return tool_error_response(request, "Embedding returned empty result"),
+        Err(e) => return tool_error_response(request, &format!("Embedding failed: {e}")),
+    };
+
+    let store_path = std::path::Path::new(&state.store_path);
+    let dimensions = state.provider.dimensions();
+
+    // Write pattern with embedding
+    let yaml_path = match engram_store::write_pattern_with_embedding(
+        store_path,
+        &pattern,
+        &embedding,
+        dimensions,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to write pattern: {e}"))
+        }
+    };
+
+    let rel_path = yaml_path
+        .strip_prefix(store_path)
+        .unwrap_or(&yaml_path)
+        .to_string_lossy()
+        .to_string();
+
+    // Commit to git
+    let committed = match git2::Repository::open(store_path) {
+        Ok(repo) => {
+            match engram_store::commit_changes(&repo, &format!("knowledge: record pattern {pattern_id}")) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return tool_error_response(
+                        request,
+                        &format!("Failed to commit: {e}"),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to open repository: {e}"))
+        }
+    };
+
+    let response_data = json!({
+        "id": pattern_id,
+        "path": rel_path,
+        "committed": committed,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 /// Read raw source text from a source repo for the given file path.
 fn read_source_content(state: &EngineState, repo: &str, file: &str) -> Option<String> {
     let root = state.source_roots.get(repo)?;
@@ -998,13 +1128,14 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
         assert!(names.contains(&"engram_status"));
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
+        assert!(names.contains(&"engram_record_pattern"));
     }
 
     #[tokio::test]
@@ -1748,6 +1879,7 @@ mod tests {
         // Create knowledge directories
         std::fs::create_dir_all(store_path.join("knowledge/decisions")).unwrap();
         std::fs::create_dir_all(store_path.join("knowledge/lessons")).unwrap();
+        std::fs::create_dir_all(store_path.join("knowledge/patterns")).unwrap();
 
         (search, provider, tmp)
     }
@@ -2273,5 +2405,186 @@ mod tests {
         assert_eq!(data["total_chunks"], 2);
         let repos = data["source_repos"].as_array().unwrap();
         assert_eq!(repos[0]["stale_chunks"], 1);
+    }
+
+    // --- engram_record_pattern tool tests ---
+
+    #[tokio::test]
+    async fn test_record_pattern_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "Test",
+                    "description": "Test description"
+                }
+            })),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_missing_name_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "description": "Test description"
+                }
+            })),
+        );
+        let responses =
+            run_server_with_store(&input, tmp.path().to_str().unwrap()).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("name"));
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_missing_description_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "Test"
+                }
+            })),
+        );
+        let responses =
+            run_server_with_store(&input, tmp.path().to_str().unwrap()).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("description"));
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_writes_and_commits() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "One module per concept",
+                    "description": "Each concept gets its own module file"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["id"].as_str().unwrap().starts_with("PAT-"));
+        assert!(data["path"].as_str().unwrap().contains("knowledge/patterns/"));
+        assert_eq!(data["committed"], true);
+
+        // Verify the YAML file exists on disk
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        assert!(yaml_path.exists());
+
+        // Verify the pattern was committed to git
+        let repo = git2::Repository::open(tmp.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let msg = head.message().unwrap();
+        assert!(msg.contains("knowledge: record pattern"));
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_with_optional_params() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "Builder pattern",
+                    "description": "Use builder for complex construction",
+                    "examples": ["Config::builder().port(8080).build()", "Query::new().filter(f).limit(10)"],
+                    "anti_patterns": ["Telescoping constructors", "Too many optional params"]
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        let content = std::fs::read_to_string(yaml_path).unwrap();
+        let pattern: engram_core::Pattern = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(pattern.examples.len(), 2);
+        assert_eq!(pattern.anti_patterns.len(), 2);
+        assert_eq!(pattern.anti_patterns[0], "Telescoping constructors");
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_auto_generates_fields() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "Auto fields test",
+                    "description": "Testing auto generation"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+        let yaml_path = tmp.path().join(data["path"].as_str().unwrap());
+        let content = std::fs::read_to_string(yaml_path).unwrap();
+        let pattern: engram_core::Pattern = serde_yaml::from_str(&content).unwrap();
+
+        assert!(pattern.id.starts_with("PAT-"));
+        assert_eq!(pattern.contributed_by, "mcp-agent");
+        assert!(!pattern.created_at.is_empty());
+        assert!(pattern.embedding_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_record_pattern_returns_json_format() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_pattern",
+                "arguments": {
+                    "name": "JSON format test",
+                    "description": "Testing response format"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+
+        // Verify all required response fields exist
+        assert!(data["id"].is_string());
+        assert!(data["path"].is_string());
+        assert!(data["committed"].is_boolean());
     }
 }
