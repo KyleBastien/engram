@@ -1409,4 +1409,28 @@ Started: 03/09/2026 17:15:47
   - `Mode::name()` now returns `&str` (was `&'static str`) — backward compatible since callers just need `&str`
   - Custom YAML loading uses `serde_yaml::from_str` and silently skips invalid files (logs to stderr)
   - Both `.yaml` and `.yml` extensions are accepted for custom definition files
+- axum v0.7 with "macros" feature for HTTP/SSE server; tokio-stream v0.1 for SSE streaming
+- McpServer.handle_json_rpc() is the public entry point for processing a single JSON-RPC request (used by SSE transport)
+- SSE transport uses mpsc channels per session: HashMap<session_id, Sender<JsonRpcResponse>>
+- MCP SSE spec: GET /sse returns SSE stream with initial "endpoint" event; POST /message?sessionId=X sends JSON-RPC requests
+- reqwest v0.12 (with "json" feature) is a dev-dependency of engram-mcp for SSE integration tests
+- serve_sse() is the public entry point for starting the SSE HTTP server; exported from engram-mcp lib.rs
+
+---
+
+## 2026-03-10 - US-081
+- Implemented SSE transport for MCP server using axum HTTP framework
+- Added `serve_sse()` function that starts an HTTP server with GET /sse and POST /message endpoints
+- SSE endpoint assigns session IDs and streams JSON-RPC responses via Server-Sent Events
+- Multiple concurrent clients supported via per-session mpsc channels
+- Added `handle_json_rpc()` public method on McpServer for request processing without stdio
+- Updated CLI serve command to use `serve_sse` when `--transport sse` is specified
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/sse.rs (new), crates/engram-mcp/src/server.rs, crates/engram-mcp/src/lib.rs, crates/engram-cli/src/main.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - axum 0.7 SSE uses `axum::response::sse::{Event, Sse}` with `tokio_stream::Stream` trait
+  - `tokio::sync::mpsc` channels work well for per-session SSE response delivery
+  - axum `Router::with_state(Arc<T>)` for shared state across handlers
+  - `tokio_stream::wrappers::ReceiverStream` wraps mpsc::Receiver into a Stream
+  - reqwest is good for SSE integration tests but SSE streaming reads may block — use timeouts
+  - For SSE tests, manually inserting sessions into state is simpler than parsing SSE stream in tests
 ---
