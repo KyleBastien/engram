@@ -268,7 +268,7 @@ async fn handle_engram_search(
     // Run hybrid search
     let results = match state
         .search
-        .search(query, &embedding, top_k, DEFAULT_ALPHA)
+        .search(query, &embedding, top_k, DEFAULT_ALPHA, None)
         .await
     {
         Ok(r) => r,

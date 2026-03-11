@@ -14,7 +14,43 @@ pub enum ChunkKind {
     Readme,
     CommentBlock,
     Knowledge,
+    Snapshot,
     Other,
+}
+
+/// Index partition for separating chunk kinds into query-time groups.
+///
+/// Each partition maps to a key range in the HNSW/BM25 indexes, allowing
+/// searches to be filtered to specific partitions for parallel querying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Partition {
+    /// Code chunks: functions, classes, methods, types, impls, modules (key range 0..DOCS_KEY_OFFSET)
+    Code = 0,
+    /// Documentation chunks: doc_sections, readmes, comment_blocks (key range DOCS_KEY_OFFSET..KNOWLEDGE_KEY_OFFSET)
+    Docs = 1,
+    /// Knowledge items: decisions, lessons, patterns (key range KNOWLEDGE_KEY_OFFSET..SNAPSHOT_KEY_OFFSET)
+    Knowledge = 2,
+    /// Snapshot items (key range SNAPSHOT_KEY_OFFSET..)
+    Snapshots = 3,
+}
+
+impl ChunkKind {
+    /// Returns the index partition this chunk kind belongs to.
+    pub fn partition(&self) -> Partition {
+        match self {
+            ChunkKind::Function
+            | ChunkKind::Class
+            | ChunkKind::Method
+            | ChunkKind::Type
+            | ChunkKind::Impl
+            | ChunkKind::Module
+            | ChunkKind::Other => Partition::Code,
+            ChunkKind::DocSection | ChunkKind::Readme | ChunkKind::CommentBlock => Partition::Docs,
+            ChunkKind::Knowledge => Partition::Knowledge,
+            ChunkKind::Snapshot => Partition::Snapshots,
+        }
+    }
 }
 
 /// Metadata for a single semantic chunk stored in the index.
@@ -66,6 +102,7 @@ mod tests {
             (ChunkKind::Readme, "readme"),
             (ChunkKind::CommentBlock, "comment_block"),
             (ChunkKind::Knowledge, "knowledge_item"),
+            (ChunkKind::Snapshot, "snapshot_item"),
             (ChunkKind::Other, "other"),
         ];
 
@@ -100,6 +137,40 @@ mod tests {
             .collect();
 
         assert_eq!(chunks, parsed);
+    }
+
+    #[test]
+    fn partition_mapping_code() {
+        let code_kinds = [
+            ChunkKind::Function,
+            ChunkKind::Class,
+            ChunkKind::Method,
+            ChunkKind::Type,
+            ChunkKind::Impl,
+            ChunkKind::Module,
+            ChunkKind::Other,
+        ];
+        for kind in &code_kinds {
+            assert_eq!(kind.partition(), Partition::Code, "{kind:?} should be Code");
+        }
+    }
+
+    #[test]
+    fn partition_mapping_docs() {
+        let doc_kinds = [
+            ChunkKind::DocSection,
+            ChunkKind::Readme,
+            ChunkKind::CommentBlock,
+        ];
+        for kind in &doc_kinds {
+            assert_eq!(kind.partition(), Partition::Docs, "{kind:?} should be Docs");
+        }
+    }
+
+    #[test]
+    fn partition_mapping_knowledge_and_snapshots() {
+        assert_eq!(ChunkKind::Knowledge.partition(), Partition::Knowledge);
+        assert_eq!(ChunkKind::Snapshot.partition(), Partition::Snapshots);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use engram_core::{ChunkKind, Result};
+use engram_core::{ChunkKind, Partition, Result};
 
-use crate::{Bm25Index, HnswIndex};
+use crate::{Bm25Index, HnswIndex, DOCS_KEY_OFFSET, KNOWLEDGE_KEY_OFFSET, SNAPSHOT_KEY_OFFSET};
 
 /// Default alpha value favoring semantic search (0.7 = 70% vector, 30% BM25).
 pub const DEFAULT_ALPHA: f64 = 0.7;
@@ -103,12 +103,14 @@ impl HybridSearch {
     /// `query_embedding` is the vector embedding of the query for HNSW search.
     /// `top_k` limits the number of results returned.
     /// `alpha` controls the weight: alpha * vector_score + (1 - alpha) * bm25_score.
+    /// `partitions` optionally restricts results to specific partitions. `None` searches all.
     pub async fn search(
         &self,
         query: &str,
         query_embedding: &[f32],
         top_k: usize,
         alpha: f64,
+        partitions: Option<&[Partition]>,
     ) -> Result<Vec<SearchResult>> {
         // Fetch more candidates than needed to allow merging and deduplication
         let fetch_k = top_k * 3;
@@ -119,9 +121,25 @@ impl HybridSearch {
         // BM25 keyword search — returns (key, score) descending
         let bm25_results = self.bm25.search(query, fetch_k);
 
+        // Filter by partition if specified
+        let hnsw_filtered: Vec<(u64, f32)> = match partitions {
+            Some(parts) => hnsw_results
+                .into_iter()
+                .filter(|(key, _)| key_in_partitions(*key, parts))
+                .collect(),
+            None => hnsw_results,
+        };
+        let bm25_filtered: Vec<(u64, f64)> = match partitions {
+            Some(parts) => bm25_results
+                .into_iter()
+                .filter(|(key, _)| key_in_partitions(*key, parts))
+                .collect(),
+            None => bm25_results,
+        };
+
         // Normalize both to [0,1] scores (higher = better)
-        let hnsw_scores = normalize_vector_scores(&hnsw_results);
-        let bm25_scores = normalize_bm25_scores(&bm25_results);
+        let hnsw_scores = normalize_vector_scores(&hnsw_filtered);
+        let bm25_scores = normalize_bm25_scores(&bm25_filtered);
 
         // Combine scores, deduplicating by key
         let mut combined: HashMap<u64, f64> = HashMap::new();
@@ -159,6 +177,24 @@ impl HybridSearch {
 
         Ok(results)
     }
+}
+
+/// Determine which partition a key belongs to based on key range.
+fn key_partition(key: u64) -> Partition {
+    if key >= SNAPSHOT_KEY_OFFSET {
+        Partition::Snapshots
+    } else if key >= KNOWLEDGE_KEY_OFFSET {
+        Partition::Knowledge
+    } else if key >= DOCS_KEY_OFFSET {
+        Partition::Docs
+    } else {
+        Partition::Code
+    }
+}
+
+/// Check if a key belongs to any of the specified partitions.
+fn key_in_partitions(key: u64, partitions: &[Partition]) -> bool {
+    partitions.contains(&key_partition(key))
 }
 
 /// Normalize HNSW distances (ascending, lower = better) to [0,1] scores (higher = better).
@@ -293,7 +329,7 @@ mod tests {
     async fn hybrid_search_returns_results() {
         let search = build_test_search();
         let query_vec = make_vector(32, 0.0);
-        let results = search.search("calculate", &query_vec, 3, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("calculate", &query_vec, 3, DEFAULT_ALPHA, None).await.unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
     }
@@ -302,7 +338,7 @@ mod tests {
     async fn results_sorted_by_descending_score() {
         let search = build_test_search();
         let query_vec = make_vector(32, 0.0);
-        let results = search.search("calculate", &query_vec, 3, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("calculate", &query_vec, 3, DEFAULT_ALPHA, None).await.unwrap();
 
         for window in results.windows(2) {
             assert!(
@@ -323,7 +359,7 @@ mod tests {
     async fn search_result_contains_all_fields() {
         let search = build_test_search();
         let query_vec = make_vector(32, 0.0);
-        let results = search.search("calculate", &query_vec, 1, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("calculate", &query_vec, 1, DEFAULT_ALPHA, None).await.unwrap();
         assert!(!results.is_empty());
 
         let r = &results[0];
@@ -340,7 +376,7 @@ mod tests {
         let search = build_test_search();
         let query_vec = make_vector(32, 0.0);
         // Both HNSW and BM25 may return the same keys — results should be deduplicated
-        let results = search.search("calculate total math", &query_vec, 10, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("calculate total math", &query_vec, 10, DEFAULT_ALPHA, None).await.unwrap();
 
         let mut seen_ids: Vec<&str> = Vec::new();
         for r in &results {
@@ -358,7 +394,7 @@ mod tests {
         let search = build_test_search();
         // Use a vector close to key 0
         let query_vec = make_vector(32, 0.0);
-        let results = search.search("render_button ui", &query_vec, 3, 1.0).await.unwrap();
+        let results = search.search("render_button ui", &query_vec, 3, 1.0, None).await.unwrap();
 
         // With alpha=1.0, only vector scores matter. The closest vector to seed 0.0 is key 0.
         assert!(!results.is_empty());
@@ -370,7 +406,7 @@ mod tests {
         let search = build_test_search();
         // Use a vector close to key 2 but query text matching key 1
         let query_vec = make_vector(32, 2.0);
-        let results = search.search("render_button ui", &query_vec, 3, 0.0).await.unwrap();
+        let results = search.search("render_button ui", &query_vec, 3, 0.0, None).await.unwrap();
 
         // With alpha=0.0, only BM25 scores matter. "render_button ui" should match key 1.
         assert!(!results.is_empty());
@@ -385,7 +421,7 @@ mod tests {
 
         let search = HybridSearch::new(hnsw, bm25, metadata);
         let query_vec = make_vector(32, 0.0);
-        let results = search.search("anything", &query_vec, 10, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("anything", &query_vec, 10, DEFAULT_ALPHA, None).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -412,7 +448,7 @@ mod tests {
 
         let search = HybridSearch::new(hnsw, bm25, metadata);
         let query_vec = make_vector(dims, 0.0);
-        let results = search.search("common", &query_vec, 5, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("common", &query_vec, 5, DEFAULT_ALPHA, None).await.unwrap();
         assert!(results.len() <= 5);
     }
 
@@ -440,7 +476,7 @@ mod tests {
         );
 
         let search = HybridSearch::new(hnsw, bm25, metadata);
-        let results = search.search("stale_func", &v0, 1, DEFAULT_ALPHA).await.unwrap();
+        let results = search.search("stale_func", &v0, 1, DEFAULT_ALPHA, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].stale);
     }
@@ -494,5 +530,142 @@ mod tests {
         for (_, score) in normalized {
             assert!((score - 1.0).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn key_partition_mapping() {
+        assert_eq!(key_partition(0), Partition::Code);
+        assert_eq!(key_partition(999_999), Partition::Code);
+        assert_eq!(key_partition(DOCS_KEY_OFFSET), Partition::Docs);
+        assert_eq!(key_partition(DOCS_KEY_OFFSET + 500), Partition::Docs);
+        assert_eq!(key_partition(KNOWLEDGE_KEY_OFFSET), Partition::Knowledge);
+        assert_eq!(key_partition(KNOWLEDGE_KEY_OFFSET + 100), Partition::Knowledge);
+        assert_eq!(key_partition(SNAPSHOT_KEY_OFFSET), Partition::Snapshots);
+        assert_eq!(key_partition(SNAPSHOT_KEY_OFFSET + 1), Partition::Snapshots);
+    }
+
+    #[test]
+    fn key_in_partitions_filter() {
+        assert!(key_in_partitions(0, &[Partition::Code]));
+        assert!(!key_in_partitions(0, &[Partition::Docs]));
+        assert!(key_in_partitions(DOCS_KEY_OFFSET, &[Partition::Docs]));
+        assert!(key_in_partitions(0, &[Partition::Code, Partition::Docs]));
+        assert!(key_in_partitions(KNOWLEDGE_KEY_OFFSET, &[Partition::Knowledge]));
+    }
+
+    /// Build a HybridSearch with items across code and knowledge partitions.
+    fn build_partitioned_search() -> HybridSearch {
+        let dims = 32;
+        // 2 code items (keys 0, 1), 1 knowledge item (key KNOWLEDGE_KEY_OFFSET)
+        let v0 = make_vector(dims, 0.0);
+        let v1 = make_vector(dims, 1.0);
+        let v_kn = make_vector(dims, 5.0);
+
+        let entries: Vec<(u64, &[f32])> = vec![
+            (0, &v0),
+            (1, &v1),
+            (KNOWLEDGE_KEY_OFFSET, &v_kn),
+        ];
+        let hnsw = HnswIndex::build(&entries, dims).unwrap();
+
+        let docs = vec![
+            make_doc(0, "calculate_total", Some("fn calculate_total()"), &["math"]),
+            make_doc(1, "render_button", Some("fn render_button()"), &["ui"]),
+            make_doc(KNOWLEDGE_KEY_OFFSET, "use_hnsw_decision", None, &["decision"]),
+        ];
+        let bm25 = Bm25Index::build(&docs);
+
+        let mut metadata: HashMap<u64, ChunkEntry> = HashMap::new();
+        metadata.insert(0, ChunkEntry {
+            chunk_id: "repo#src/math.rs#calculate_total".to_string(),
+            kind: ChunkKind::Function,
+            name: "calculate_total".to_string(),
+            signature: Some("fn calculate_total()".to_string()),
+            file: "src/math.rs".to_string(),
+            repo: "test-repo".to_string(),
+            start_line: 1,
+            end_line: 10,
+            stale: false,
+        });
+        metadata.insert(1, ChunkEntry {
+            chunk_id: "repo#src/ui.rs#render_button".to_string(),
+            kind: ChunkKind::Function,
+            name: "render_button".to_string(),
+            signature: Some("fn render_button()".to_string()),
+            file: "src/ui.rs".to_string(),
+            repo: "test-repo".to_string(),
+            start_line: 1,
+            end_line: 10,
+            stale: false,
+        });
+        metadata.insert(KNOWLEDGE_KEY_OFFSET, ChunkEntry {
+            chunk_id: "knowledge#decision:DEC-001".to_string(),
+            kind: ChunkKind::Knowledge,
+            name: "use_hnsw_decision".to_string(),
+            signature: None,
+            file: String::new(),
+            repo: "knowledge".to_string(),
+            start_line: 0,
+            end_line: 0,
+            stale: false,
+        });
+
+        HybridSearch::new(hnsw, bm25, metadata)
+    }
+
+    #[tokio::test]
+    async fn search_filtered_to_code_excludes_knowledge() {
+        let search = build_partitioned_search();
+        let query_vec = make_vector(32, 5.0); // close to knowledge vector
+        let results = search
+            .search("decision", &query_vec, 10, DEFAULT_ALPHA, Some(&[Partition::Code]))
+            .await
+            .unwrap();
+
+        for r in &results {
+            assert_ne!(r.kind, ChunkKind::Knowledge, "code filter should exclude knowledge");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_filtered_to_knowledge_only() {
+        let search = build_partitioned_search();
+        let query_vec = make_vector(32, 5.0);
+        let results = search
+            .search("decision", &query_vec, 10, DEFAULT_ALPHA, Some(&[Partition::Knowledge]))
+            .await
+            .unwrap();
+
+        assert!(!results.is_empty(), "should find knowledge items");
+        for r in &results {
+            assert_eq!(r.kind, ChunkKind::Knowledge, "knowledge filter should only return knowledge");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_with_multiple_partitions() {
+        let search = build_partitioned_search();
+        let query_vec = make_vector(32, 0.0);
+        let results = search
+            .search("calculate", &query_vec, 10, DEFAULT_ALPHA, Some(&[Partition::Code, Partition::Knowledge]))
+            .await
+            .unwrap();
+
+        // Should include both code and knowledge results
+        assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_none_partitions_returns_all() {
+        let search = build_partitioned_search();
+        let query_vec = make_vector(32, 0.0);
+
+        let all_results = search
+            .search("calculate decision", &query_vec, 10, DEFAULT_ALPHA, None)
+            .await
+            .unwrap();
+
+        // With None, all partitions searched — should see code + knowledge
+        assert!(all_results.len() >= 2, "None should search all partitions");
     }
 }

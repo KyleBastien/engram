@@ -8,7 +8,7 @@ mod onboarding;
 mod snapshot;
 mod symbol;
 
-pub use chunk::{ChunkKind, ChunkMetadata};
+pub use chunk::{ChunkKind, ChunkMetadata, Partition};
 pub use config::{
     BenchmarkConfig, ChunkingConfig, ContextConfig, DashboardConfig, EmbeddingConfig, HooksConfig,
     ModePreset, ModesConfig, OllamaConfig, SearchConfig, SourceConfig, StorageConfig, StoreConfig,

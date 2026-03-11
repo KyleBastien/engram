@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use engram_core::{ChunkKind, ChunkMetadata, EngramError, Result, StoreConfig};
+use engram_core::{ChunkKind, ChunkMetadata, EngramError, Partition, Result, StoreConfig};
 use engram_store::{
     read_chunks_jsonl, read_embeddings_bin, read_manifest, scan_knowledge_embeddings,
 };
@@ -56,6 +56,7 @@ impl IndexManager {
         let cache_dir = store_root.join(".engram-cache");
 
         // 3. Try compiled cache (fast path)
+        //    Note: cached HNSW/BM25 already have partition-aware keys from previous cold boot.
         if let Some((hnsw, bm25, chunks)) =
             try_load_cache(&cache_dir, &manifest_hash, dimensions)?
         {
@@ -93,15 +94,31 @@ impl IndexManager {
         // 5. Load knowledge embeddings (partition 2)
         let (knowledge_chunks, knowledge_vectors) =
             load_knowledge_vectors(store_root, dimensions)?;
-        let code_count = all_chunks.len();
 
-        // 6. Build HNSW index with code chunks + knowledge items
-        let mut entries: Vec<(u64, &[f32])> = (0..code_count)
-            .map(|i| {
-                let offset = i * dimensions;
-                (i as u64, &all_vectors[offset..offset + dimensions])
-            })
-            .collect();
+        // 5a. Split code vs doc chunks by partition
+        let mut code_indices: Vec<usize> = Vec::new();
+        let mut doc_indices: Vec<usize> = Vec::new();
+        for (i, chunk) in all_chunks.iter().enumerate() {
+            if chunk.kind.partition() == Partition::Code {
+                code_indices.push(i);
+            } else {
+                doc_indices.push(i);
+            }
+        }
+
+        // 6. Build HNSW index with partition-aware keys
+        let mut entries: Vec<(u64, &[f32])> = Vec::new();
+        for (key_idx, &chunk_idx) in code_indices.iter().enumerate() {
+            let offset = chunk_idx * dimensions;
+            entries.push((key_idx as u64, &all_vectors[offset..offset + dimensions]));
+        }
+        for (key_idx, &chunk_idx) in doc_indices.iter().enumerate() {
+            let offset = chunk_idx * dimensions;
+            entries.push((
+                DOCS_KEY_OFFSET + key_idx as u64,
+                &all_vectors[offset..offset + dimensions],
+            ));
+        }
         for (i, _chunk) in knowledge_chunks.iter().enumerate() {
             let offset = i * dimensions;
             entries.push((
@@ -111,17 +128,26 @@ impl IndexManager {
         }
         let hnsw = HnswIndex::build(&entries, dimensions)?;
 
-        // 7. Build BM25 index with code chunks + knowledge items
-        let mut bm25_docs: Vec<Bm25Document> = all_chunks
-            .iter()
-            .enumerate()
-            .map(|(i, chunk)| Bm25Document {
-                key: i as u64,
+        // 7. Build BM25 index with partition-aware keys
+        let mut bm25_docs: Vec<Bm25Document> = Vec::new();
+        for (key_idx, &chunk_idx) in code_indices.iter().enumerate() {
+            let chunk = &all_chunks[chunk_idx];
+            bm25_docs.push(Bm25Document {
+                key: key_idx as u64,
                 name: chunk.name.clone(),
                 signature: chunk.signature.clone(),
                 tags: chunk.tags.clone(),
-            })
-            .collect();
+            });
+        }
+        for (key_idx, &chunk_idx) in doc_indices.iter().enumerate() {
+            let chunk = &all_chunks[chunk_idx];
+            bm25_docs.push(Bm25Document {
+                key: DOCS_KEY_OFFSET + key_idx as u64,
+                name: chunk.name.clone(),
+                signature: chunk.signature.clone(),
+                tags: chunk.tags.clone(),
+            });
+        }
         for (i, chunk) in knowledge_chunks.iter().enumerate() {
             bm25_docs.push(Bm25Document {
                 key: KNOWLEDGE_KEY_OFFSET + i as u64,
@@ -204,31 +230,57 @@ impl IndexManager {
     /// Consume the IndexManager and produce a HybridSearch instance.
     ///
     /// Converts the ordered chunk metadata into the HashMap<u64, ChunkEntry>
-    /// that HybridSearch expects, where keys match the HNSW/BM25 index positions.
-    /// Knowledge items are included with keys offset by `KNOWLEDGE_KEY_OFFSET`.
+    /// that HybridSearch expects, with partition-aware keys:
+    /// - Code chunks: 0..DOCS_KEY_OFFSET
+    /// - Doc chunks: DOCS_KEY_OFFSET..KNOWLEDGE_KEY_OFFSET
+    /// - Knowledge items: KNOWLEDGE_KEY_OFFSET..SNAPSHOT_KEY_OFFSET
+    /// - Snapshot items: SNAPSHOT_KEY_OFFSET..
     pub fn into_hybrid_search(self) -> HybridSearch {
-        let mut metadata: std::collections::HashMap<u64, ChunkEntry> = self
-            .chunks
-            .into_iter()
-            .enumerate()
-            .map(|(i, chunk)| {
-                let (repo, file) = extract_repo_file(&chunk.chunk_id);
-                (
-                    i as u64,
-                    ChunkEntry {
-                        chunk_id: chunk.chunk_id,
-                        kind: chunk.kind,
-                        name: chunk.name,
-                        signature: chunk.signature,
-                        file,
-                        repo,
-                        start_line: chunk.start_line,
-                        end_line: chunk.end_line,
-                        stale: false,
-                    },
-                )
-            })
-            .collect();
+        let mut metadata: std::collections::HashMap<u64, ChunkEntry> =
+            std::collections::HashMap::new();
+
+        let mut code_idx: u64 = 0;
+        let mut doc_idx: u64 = 0;
+        for chunk in self.chunks.into_iter() {
+            let (repo, file) = extract_repo_file(&chunk.chunk_id);
+            let key = match chunk.kind.partition() {
+                Partition::Code => {
+                    let k = code_idx;
+                    code_idx += 1;
+                    k
+                }
+                Partition::Docs => {
+                    let k = DOCS_KEY_OFFSET + doc_idx;
+                    doc_idx += 1;
+                    k
+                }
+                // Should not happen for walk_index chunks, but handle gracefully
+                Partition::Knowledge => {
+                    let k = DOCS_KEY_OFFSET + doc_idx;
+                    doc_idx += 1;
+                    k
+                }
+                Partition::Snapshots => {
+                    let k = DOCS_KEY_OFFSET + doc_idx;
+                    doc_idx += 1;
+                    k
+                }
+            };
+            metadata.insert(
+                key,
+                ChunkEntry {
+                    chunk_id: chunk.chunk_id,
+                    kind: chunk.kind,
+                    name: chunk.name,
+                    signature: chunk.signature,
+                    file,
+                    repo,
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    stale: false,
+                },
+            );
+        }
 
         // Add knowledge items at KNOWLEDGE_KEY_OFFSET
         for (i, chunk) in self.knowledge_chunks.into_iter().enumerate() {
@@ -335,11 +387,22 @@ fn collect_chunk_files(dir: &Path, results: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Key offset for documentation chunks in the HNSW index (partition 1).
+///
+/// Doc chunk keys start at this value to separate them from code chunk keys (partition 0).
+pub const DOCS_KEY_OFFSET: u64 = 1_000_000;
+
 /// Key offset for knowledge items in the HNSW index (partition 2).
 ///
-/// Knowledge item keys start at this value to separate them from code chunk keys
-/// (partition 0/1). This allows future partition-based filtering by key range.
+/// Knowledge item keys start at this value to separate them from doc chunk keys
+/// (partition 1).
 pub const KNOWLEDGE_KEY_OFFSET: u64 = 2_000_000;
+
+/// Key offset for snapshot items in the HNSW index (partition 3).
+///
+/// Snapshot item keys start at this value to separate them from knowledge item keys
+/// (partition 2).
+pub const SNAPSHOT_KEY_OFFSET: u64 = 3_000_000;
 
 /// Load knowledge embedding vectors from the store.
 ///
