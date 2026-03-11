@@ -1,3 +1,4 @@
+mod benchmark;
 mod chunk;
 mod config;
 mod embedding;
@@ -8,6 +9,7 @@ mod onboarding;
 mod snapshot;
 mod symbol;
 
+pub use benchmark::{BenchmarkEvent, BenchmarkMode, BenchmarkReport, BenchmarkSession, TaskOutcome};
 pub use chunk::{ChunkKind, ChunkMetadata, Partition};
 pub use config::{
     BenchmarkConfig, ChunkingConfig, ContextConfig, DashboardConfig, EmbeddingConfig, HooksConfig,
