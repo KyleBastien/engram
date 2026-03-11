@@ -1,3 +1,4 @@
+mod abstractions;
 mod architecture;
 mod chunker;
 mod commands;
@@ -9,6 +10,7 @@ mod metadata;
 mod pipeline;
 mod sliding;
 
+pub use abstractions::extract_key_abstractions;
 pub use architecture::analyze_directory_structure;
 pub use chunker::{Language, RawChunk, TreeSitterChunker};
 pub use commands::extract_build_commands;
