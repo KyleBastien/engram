@@ -207,6 +207,28 @@ pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for onboarding MCP tools.
+pub fn onboarding_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_onboard",
+        "description": "Trigger the onboarding pipeline to analyze a source repository and write knowledge YAML files (project overview, build commands, architecture map, key abstractions) to the store. Idempotent — re-running overwrites previous onboarding data.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Source repo name from configured source_roots (uses first available if omitted)"
+                },
+                "depth": {
+                    "type": "string",
+                    "enum": ["quick", "standard", "deep"],
+                    "description": "How deep the analysis should go: quick (metadata + commands), standard (+ architecture + abstractions), deep (reserved for full symbol export). Default: standard"
+                }
+            }
+        }
+    })]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +409,28 @@ mod tests {
         assert!(props.contains_key("summary"));
         assert!(props.contains_key("key_context"));
         assert!(props.contains_key("full_transcript"));
+    }
+
+    #[test]
+    fn test_onboarding_tool_definitions_count() {
+        let tools = onboarding_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_onboard");
+    }
+
+    #[test]
+    fn test_onboard_has_no_required_params() {
+        let tools = onboarding_tool_definitions();
+        let onboard = &tools[0];
+        assert!(onboard["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_onboard_has_optional_params() {
+        let tools = onboarding_tool_definitions();
+        let onboard = &tools[0];
+        let props = onboard["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("repo"));
+        assert!(props.contains_key("depth"));
     }
 }

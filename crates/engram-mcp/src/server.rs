@@ -5,11 +5,11 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Partition, Pattern, Snapshot, SnapshotTier};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, OnboardingDepth, Partition, Pattern, Snapshot, SnapshotTier, SourceConfig};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{knowledge_tool_definitions, phase1_tool_definitions};
+use crate::tools::{knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -176,6 +176,7 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
 fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     let mut tools = phase1_tool_definitions();
     tools.extend(knowledge_tool_definitions());
+    tools.extend(onboarding_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -203,6 +204,7 @@ async fn handle_tools_call(
         "engram_record_pattern" => handle_engram_record_pattern(request, state).await,
         "engram_record_glossary" => handle_engram_record_glossary(request, state).await,
         "engram_snapshot" => handle_engram_snapshot(request, state).await,
+        "engram_onboard" => handle_engram_onboard(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -1204,6 +1206,79 @@ fn read_source_content(state: &EngineState, repo: &str, file: &str) -> Option<St
     std::fs::read_to_string(path).ok()
 }
 
+async fn handle_engram_onboard(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    // Optional: repo name — defaults to first source root
+    let repo_name = args
+        .and_then(|a| a.get("repo"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Resolve repo path from source_roots
+    let (resolved_name, repo_path) = if repo_name.is_empty() {
+        match state.source_roots.iter().next() {
+            Some((name, path)) => (name.clone(), path.clone()),
+            None => return tool_error_response(request, "No source roots configured"),
+        }
+    } else {
+        match state.source_roots.get(repo_name) {
+            Some(path) => (repo_name.to_string(), path.clone()),
+            None => return tool_error_response(
+                request,
+                &format!("Unknown repo: {}. Available: {:?}", repo_name, state.source_roots.keys().collect::<Vec<_>>()),
+            ),
+        }
+    };
+
+    // Optional: depth — defaults to standard
+    let depth = match args.and_then(|a| a.get("depth")).and_then(|v| v.as_str()) {
+        Some("quick") => OnboardingDepth::Quick,
+        Some("deep") => OnboardingDepth::Deep,
+        Some("standard") | None => OnboardingDepth::Standard,
+        Some(other) => return tool_error_response(
+            request,
+            &format!("Invalid depth '{}'. Must be quick, standard, or deep", other),
+        ),
+    };
+
+    let store_path = std::path::PathBuf::from(&state.store_path);
+    let source_config = SourceConfig {
+        name: resolved_name,
+        path: repo_path.to_string_lossy().to_string(),
+        include: vec![],
+        exclude: vec![],
+    };
+
+    match engram_ingest::run_onboarding(&repo_path, &store_path, &source_config, depth).await {
+        Ok(report) => {
+            let result = serde_json::to_value(&report).unwrap_or_default();
+            JsonRpcResponse::success(
+                request.id.clone(),
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": result.to_string()
+                    }],
+                    "isError": false
+                }),
+            )
+        }
+        Err(e) => tool_error_response(request, &format!("Onboarding failed: {}", e)),
+    }
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -1556,7 +1631,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -1566,6 +1641,7 @@ mod tests {
         assert!(names.contains(&"engram_record_pattern"));
         assert!(names.contains(&"engram_record_glossary"));
         assert!(names.contains(&"engram_snapshot"));
+        assert!(names.contains(&"engram_onboard"));
     }
 
     #[tokio::test]
@@ -3378,5 +3454,149 @@ mod tests {
         assert!(data["term"].is_string());
         assert!(data["action"].is_string());
         assert!(data["committed"].is_boolean());
+    }
+
+    // --- engram_onboard tests ---
+
+    #[tokio::test]
+    async fn test_onboard_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_onboard", "arguments": {}})),
+        );
+        let responses = run_server(& input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Engine not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_onboard_no_source_roots_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_onboard", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No source roots configured"));
+    }
+
+    #[tokio::test]
+    async fn test_onboard_unknown_repo_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (search, provider) = build_test_engine();
+        let mut source_roots = HashMap::new();
+        source_roots.insert("my-repo".to_string(), tmp.path().to_path_buf());
+        let server = McpServer::with_engine_and_sources(search, provider, source_roots);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_onboard", "arguments": {"repo": "nonexistent"}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Unknown repo: nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_onboard_invalid_depth_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (search, provider) = build_test_engine();
+        let mut source_roots = HashMap::new();
+        source_roots.insert("my-repo".to_string(), tmp.path().to_path_buf());
+        let server = McpServer::with_engine_and_sources(search, provider, source_roots);
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_onboard", "arguments": {"depth": "ultra"}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Invalid depth"));
+    }
+
+    #[tokio::test]
+    async fn test_onboard_success_with_quick_depth() {
+        // Create a fake repo with a Cargo.toml so metadata detection works
+        let repo_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo_dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ).unwrap();
+        std::fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+        std::fs::write(repo_dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        // Create a git-backed store
+        let store_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(store_dir.path()).unwrap();
+
+        let (search, provider) = build_test_engine();
+        let mut source_roots = HashMap::new();
+        source_roots.insert("test-repo".to_string(), repo_dir.path().to_path_buf());
+        let mut server = McpServer::with_engine_and_sources(search, provider, source_roots);
+        server.set_boot_info(0, store_dir.path().to_string_lossy().to_string(), "none".to_string());
+
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_onboard", "arguments": {"depth": "quick"}})),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        let responses: Vec<JsonRpcResponse> = output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["depth"], "quick");
+        assert_eq!(data["metadata_detected"], true);
+        assert_eq!(data["commands_extracted"], true);
+        assert_eq!(data["architecture_analyzed"], false);
+        assert_eq!(data["abstractions_extracted"], false);
+        assert!(data["files_written"].as_array().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_onboard_tools_listed() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server(&input).await;
+        let tools = responses[0].result.as_ref().unwrap()["tools"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_onboard"));
     }
 }

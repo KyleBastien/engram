@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 engram-core = { path = "../engram-core" }
+engram-ingest = { path = "../engram-ingest" }
 engram-query = { path = "../engram-query" }
 engram-store = { path = "../engram-store" }
 async-trait = "0.1"
