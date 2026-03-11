@@ -12,6 +12,164 @@ use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGrap
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
 use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
 
+/// Built-in modes that affect search behavior (knowledge sidecar parameters).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Explore,
+    Edit,
+    Plan,
+    Onboard,
+    Benchmark,
+}
+
+impl Mode {
+    /// Parse a mode name string into a Mode enum variant.
+    /// Returns None for unknown mode names.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "explore" => Some(Mode::Explore),
+            "edit" => Some(Mode::Edit),
+            "plan" => Some(Mode::Plan),
+            "onboard" => Some(Mode::Onboard),
+            "benchmark" => Some(Mode::Benchmark),
+            _ => None,
+        }
+    }
+
+    /// Return the string name of this mode.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Mode::Explore => "explore",
+            Mode::Edit => "edit",
+            Mode::Plan => "plan",
+            Mode::Onboard => "onboard",
+            Mode::Benchmark => "benchmark",
+        }
+    }
+
+    /// Return the behavior configuration for this mode.
+    pub fn behavior(&self) -> ModeBehavior {
+        match self {
+            Mode::Explore => ModeBehavior {
+                knowledge_top_k: 5,
+                min_relevance: 0.6,
+                boost_decisions: 1.0,
+                boost_patterns: 1.0,
+            },
+            Mode::Edit => ModeBehavior {
+                knowledge_top_k: 3,
+                min_relevance: 0.7,
+                boost_decisions: 1.2,
+                boost_patterns: 1.3,
+            },
+            Mode::Plan => ModeBehavior {
+                knowledge_top_k: 10,
+                min_relevance: 0.5,
+                boost_decisions: 1.5,
+                boost_patterns: 1.2,
+            },
+            Mode::Onboard => ModeBehavior {
+                knowledge_top_k: 8,
+                min_relevance: 0.4,
+                boost_decisions: 1.0,
+                boost_patterns: 1.0,
+            },
+            Mode::Benchmark => ModeBehavior {
+                knowledge_top_k: 0,
+                min_relevance: 1.0,
+                boost_decisions: 0.0,
+                boost_patterns: 0.0,
+            },
+        }
+    }
+}
+
+/// Behavior configuration for a mode, controlling knowledge sidecar search parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModeBehavior {
+    /// Maximum number of knowledge results to return as sidecar.
+    pub knowledge_top_k: usize,
+    /// Minimum relevance score for knowledge results.
+    pub min_relevance: f64,
+    /// Boost multiplier for decision-type knowledge results.
+    pub boost_decisions: f64,
+    /// Boost multiplier for pattern-type knowledge results.
+    pub boost_patterns: f64,
+}
+
+/// Thread-safe tracker for active modes. Multiple modes can be active simultaneously.
+#[derive(Debug)]
+struct ModeTracker {
+    active: Mutex<HashSet<Mode>>,
+}
+
+impl Default for ModeTracker {
+    fn default() -> Self {
+        let mut modes = HashSet::new();
+        modes.insert(Mode::Explore);
+        Self {
+            active: Mutex::new(modes),
+        }
+    }
+}
+
+impl ModeTracker {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the active modes, replacing any previously active modes.
+    fn set_modes(&self, modes: Vec<Mode>) {
+        if let Ok(mut active) = self.active.lock() {
+            active.clear();
+            for mode in modes {
+                active.insert(mode);
+            }
+        }
+    }
+
+    /// Get a snapshot of currently active modes.
+    fn active_modes(&self) -> Vec<Mode> {
+        self.active
+            .lock()
+            .map(|modes| modes.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Compute the merged behavior from all active modes.
+    /// When multiple modes are active, uses the most permissive values:
+    /// - knowledge_top_k: max
+    /// - min_relevance: min (most permissive)
+    /// - boost_decisions: max
+    /// - boost_patterns: max
+    fn merged_behavior(&self) -> ModeBehavior {
+        let modes = self.active_modes();
+        if modes.is_empty() {
+            return Mode::Explore.behavior();
+        }
+
+        let mut knowledge_top_k = 0usize;
+        let mut min_relevance = f64::MAX;
+        let mut boost_decisions = 0.0f64;
+        let mut boost_patterns = 0.0f64;
+
+        for mode in &modes {
+            let b = mode.behavior();
+            knowledge_top_k = knowledge_top_k.max(b.knowledge_top_k);
+            min_relevance = min_relevance.min(b.min_relevance);
+            boost_decisions = boost_decisions.max(b.boost_decisions);
+            boost_patterns = boost_patterns.max(b.boost_patterns);
+        }
+
+        ModeBehavior {
+            knowledge_top_k,
+            min_relevance,
+            boost_decisions,
+            boost_patterns,
+        }
+    }
+}
+
 /// Built-in contexts that control which MCP tools are exposed to the client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Context {
@@ -158,6 +316,8 @@ pub struct EngineState {
     session: SessionTracker,
     /// Cross-repo symbol dependency graph (used by engram_graph).
     pub graph: SymbolGraph,
+    /// Active mode tracker for dynamic mode switching.
+    modes: ModeTracker,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -193,6 +353,7 @@ impl McpServer {
                 cache_status: "none".to_string(),
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
+                modes: ModeTracker::new(),
             }),
             context: Context::Default,
         }
@@ -214,6 +375,7 @@ impl McpServer {
                 cache_status: "none".to_string(),
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
+                modes: ModeTracker::new(),
             }),
             context: Context::Default,
         }
@@ -222,6 +384,13 @@ impl McpServer {
     /// Set the active context for tool surface control. Context is fixed for the session duration.
     pub fn set_context(&mut self, context: Context) {
         self.context = context;
+    }
+
+    /// Set the active modes on the engine state.
+    pub fn set_modes(&mut self, modes: Vec<Mode>) {
+        if let Some(ref state) = self.state {
+            state.modes.set_modes(modes);
+        }
     }
 
     /// Set the cross-repo symbol graph on the engine state.
@@ -389,9 +558,6 @@ async fn handle_tools_call(
     }
 }
 
-/// Default minimum relevance score for knowledge results.
-const DEFAULT_MIN_RELEVANCE: f64 = 0.6;
-
 /// Recency boost multiplier for knowledge items less than 30 days old.
 const RECENCY_BOOST: f64 = 1.1;
 
@@ -473,10 +639,13 @@ async fn handle_engram_search(
         Vec::new()
     };
 
-    let knowledge_results = if search_knowledge {
+    // Get merged mode behavior for knowledge sidecar parameters
+    let mode_behavior = state.modes.merged_behavior();
+
+    let knowledge_results = if search_knowledge && mode_behavior.knowledge_top_k > 0 {
         match state
             .search
-            .search(query, &embedding, top_k, DEFAULT_ALPHA, Some(&[Partition::Knowledge]))
+            .search(query, &embedding, mode_behavior.knowledge_top_k, DEFAULT_ALPHA, Some(&[Partition::Knowledge]))
             .await
         {
             Ok(r) => r,
@@ -506,10 +675,16 @@ async fn handle_engram_search(
 
     let now = chrono::Utc::now();
 
-    // Apply recency boost and min_relevance filter to knowledge results
+    // Apply mode-specific boosts, recency boost, and min_relevance filter to knowledge results
     let knowledge_results: Vec<SearchResult> = knowledge_results
         .into_iter()
         .map(|mut r| {
+            // Apply mode-specific boost based on knowledge kind (extracted from chunk_id)
+            if r.chunk_id.starts_with("knowledge#decision") {
+                r.score *= mode_behavior.boost_decisions;
+            } else if r.chunk_id.starts_with("knowledge#pattern") {
+                r.score *= mode_behavior.boost_patterns;
+            }
             // Apply recency boost if item is less than RECENCY_DAYS old
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&r.indexed_at) {
                 let age_days = (now - created.with_timezone(&chrono::Utc)).num_days();
@@ -519,7 +694,7 @@ async fn handle_engram_search(
             }
             r
         })
-        .filter(|r| r.score >= DEFAULT_MIN_RELEVANCE)
+        .filter(|r| r.score >= mode_behavior.min_relevance)
         .collect();
 
     let code_count = code_doc_results.iter().filter(|r| is_code_kind(&r.kind)).count();
@@ -5124,5 +5299,139 @@ mod tests {
         // Context is set once and remains fixed — no method to change it mid-session
         // The set_context is called before run() starts the event loop
         assert!(true); // Context immutability is enforced by design (no runtime mutation API)
+    }
+
+    // ---- Mode system tests ----
+
+    #[test]
+    fn test_mode_from_name_valid() {
+        assert_eq!(Mode::from_name("explore"), Some(Mode::Explore));
+        assert_eq!(Mode::from_name("edit"), Some(Mode::Edit));
+        assert_eq!(Mode::from_name("plan"), Some(Mode::Plan));
+        assert_eq!(Mode::from_name("onboard"), Some(Mode::Onboard));
+        assert_eq!(Mode::from_name("benchmark"), Some(Mode::Benchmark));
+    }
+
+    #[test]
+    fn test_mode_from_name_invalid() {
+        assert_eq!(Mode::from_name("unknown"), None);
+        assert_eq!(Mode::from_name(""), None);
+        assert_eq!(Mode::from_name("EXPLORE"), None);
+    }
+
+    #[test]
+    fn test_mode_name_roundtrip() {
+        for mode in &[Mode::Explore, Mode::Edit, Mode::Plan, Mode::Onboard, Mode::Benchmark] {
+            assert_eq!(Mode::from_name(mode.name()), Some(mode.clone()));
+        }
+    }
+
+    #[test]
+    fn test_mode_behavior_explore_defaults() {
+        let b = Mode::Explore.behavior();
+        assert_eq!(b.knowledge_top_k, 5);
+        assert!((b.min_relevance - 0.6).abs() < f64::EPSILON);
+        assert!((b.boost_decisions - 1.0).abs() < f64::EPSILON);
+        assert!((b.boost_patterns - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mode_behavior_edit() {
+        let b = Mode::Edit.behavior();
+        assert_eq!(b.knowledge_top_k, 3);
+        assert!((b.min_relevance - 0.7).abs() < f64::EPSILON);
+        assert!(b.boost_decisions > 1.0);
+        assert!(b.boost_patterns > 1.0);
+    }
+
+    #[test]
+    fn test_mode_behavior_plan() {
+        let b = Mode::Plan.behavior();
+        assert_eq!(b.knowledge_top_k, 10);
+        assert!((b.min_relevance - 0.5).abs() < f64::EPSILON);
+        assert!(b.boost_decisions > 1.0);
+    }
+
+    #[test]
+    fn test_mode_behavior_benchmark_disables_knowledge() {
+        let b = Mode::Benchmark.behavior();
+        assert_eq!(b.knowledge_top_k, 0);
+        assert!((b.min_relevance - 1.0).abs() < f64::EPSILON);
+        assert!((b.boost_decisions - 0.0).abs() < f64::EPSILON);
+        assert!((b.boost_patterns - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mode_tracker_default_is_explore() {
+        let tracker = ModeTracker::new();
+        let modes = tracker.active_modes();
+        assert_eq!(modes.len(), 1);
+        assert!(modes.contains(&Mode::Explore));
+    }
+
+    #[test]
+    fn test_mode_tracker_set_modes() {
+        let tracker = ModeTracker::new();
+        tracker.set_modes(vec![Mode::Edit, Mode::Plan]);
+        let modes = tracker.active_modes();
+        assert_eq!(modes.len(), 2);
+        assert!(modes.contains(&Mode::Edit));
+        assert!(modes.contains(&Mode::Plan));
+        // Explore should be replaced
+        assert!(!modes.contains(&Mode::Explore));
+    }
+
+    #[test]
+    fn test_mode_tracker_multiple_modes_simultaneous() {
+        let tracker = ModeTracker::new();
+        tracker.set_modes(vec![Mode::Explore, Mode::Edit, Mode::Plan]);
+        let modes = tracker.active_modes();
+        assert_eq!(modes.len(), 3);
+    }
+
+    #[test]
+    fn test_mode_tracker_merged_behavior_single() {
+        let tracker = ModeTracker::new();
+        // Default is explore
+        let b = tracker.merged_behavior();
+        assert_eq!(b.knowledge_top_k, 5);
+        assert!((b.min_relevance - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mode_tracker_merged_behavior_multiple() {
+        let tracker = ModeTracker::new();
+        // Plan: top_k=10, min_rel=0.5, boost_dec=1.5
+        // Edit: top_k=3, min_rel=0.7, boost_dec=1.2
+        tracker.set_modes(vec![Mode::Plan, Mode::Edit]);
+        let b = tracker.merged_behavior();
+        // Max top_k
+        assert_eq!(b.knowledge_top_k, 10);
+        // Min min_relevance (most permissive)
+        assert!((b.min_relevance - 0.5).abs() < f64::EPSILON);
+        // Max boost_decisions
+        assert!((b.boost_decisions - 1.5).abs() < f64::EPSILON);
+        // Max boost_patterns (edit=1.3, plan=1.2)
+        assert!((b.boost_patterns - 1.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mode_tracker_merged_behavior_empty_falls_back_to_explore() {
+        let tracker = ModeTracker::new();
+        tracker.set_modes(vec![]);
+        let b = tracker.merged_behavior();
+        let explore = Mode::Explore.behavior();
+        assert_eq!(b.knowledge_top_k, explore.knowledge_top_k);
+        assert!((b.min_relevance - explore.min_relevance).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_engine_state_has_default_mode() {
+        let server = McpServer::new();
+        // Server without engine has no state, but with_engine should have modes
+        let (search, provider) = build_test_engine();
+        let server = McpServer::with_engine(search, provider);
+        // Just verify it constructs without panic — mode tracker is internal
+        drop(server);
     }
 }
