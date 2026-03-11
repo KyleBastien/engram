@@ -92,6 +92,11 @@ Started: 03/09/2026 17:15:47
 - rust-embed v8: `#[derive(Embed)]` + `#[folder = "src/assets/"]`; axum nest() for prefix routing (not catch-all mid-path)
 - engram-dashboard depends on engram-core, axum 0.7, rust-embed 8, mime_guess 2, tokio 1
 - Dashboard server spawned via `tokio::spawn` in CLI serve command; runs on DashboardConfig.port (default 3200)
+- axum 0.7.9 `Message::Text` takes `String` directly (not `Utf8Bytes`); don't use `.into()` — clippy `useless_conversion` lint
+- tokio::sync::broadcast for multi-subscriber event fan-out; `broadcast::channel(capacity)` returns `(Sender, Receiver)`
+- EventBroadcaster (engram-dashboard) wraps broadcast::Sender<DashboardEvent>; clone and share between MCP server and dashboard
+- DashboardEvent uses `#[serde(tag = "type", rename_all = "snake_case")]` for JSON events with `type` field
+- tokio-tungstenite v0.24 + futures-util v0.3 for WebSocket client in tests (dev-dependencies)
 
 ---
 
@@ -1526,4 +1531,21 @@ Started: 03/09/2026 17:15:47
   - axum 0.7 catch-all syntax is `{*path}` but it can't be used mid-path like `/dashboard/{*path}` — use `nest("/dashboard", routes)` instead
   - Dashboard is spawned via `tokio::spawn` in CLI serve command, runs concurrently with MCP server
   - When changing config defaults, check for tests asserting old defaults (test_store_config_default in config.rs)
+---
+
+## 2026-03-10 - US-088
+- Implemented WebSocket endpoint at /ws in engram-dashboard for real-time event broadcasting
+- Defined DashboardEvent enum with 5 variants: SearchQuery, KnowledgeWrite, ReindexProgress, SessionConnect, SessionDisconnect
+- Created EventBroadcaster (wraps tokio::sync::broadcast) for multi-client fan-out
+- Added build_router_with_events() that wires /ws route alongside existing /dashboard routes
+- Updated serve_dashboard() to accept EventBroadcaster parameter
+- Updated engram-cli to create and pass EventBroadcaster when spawning dashboard
+- 13 tests total (5 existing + 8 new): event serialization, broadcast channel, WebSocket connectivity, multi-client support
+- Files changed: crates/engram-dashboard/Cargo.toml, crates/engram-dashboard/src/lib.rs, crates/engram-cli/src/main.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - axum 0.7.9 Message::Text takes String directly — don't use .into() or clippy useless_conversion fires
+  - tokio-tungstenite v0.24 is compatible with axum 0.7 WebSocket (both use tungstenite 0.24 underneath)
+  - Router<S>::new() with typed state works for mixed routes — handlers without State work with any state type
+  - Use Arc<EventBroadcaster> as axum State for sharing across handlers
+  - futures-util StreamExt is needed for .next() on WebSocket streams in tests; SinkExt only needed for .send() (close uses the stream directly)
 ---
