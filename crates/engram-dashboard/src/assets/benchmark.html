@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engram Dashboard &mdash; Benchmark Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+        }
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.5rem; }
+        header .subtitle { color: #94a3b8; font-size: 0.9rem; }
+        nav {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        nav a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            border: 1px solid #334155;
+        }
+        nav a:hover { color: #e2e8f0; border-color: #64748b; }
+        nav a.active { color: #3b82f6; border-color: #3b82f6; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            flex: 1;
+            min-height: 0;
+        }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .card h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }
+        .card-body {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .full-width { grid-column: 1 / -1; }
+        .chart-card { grid-column: 1 / -1; }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.4rem 0;
+            font-size: 0.85rem;
+        }
+        .stat-label { color: #64748b; }
+        .stat-value { color: #e2e8f0; font-weight: 500; }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-green { background: #22c55e; color: #0f172a; }
+        .badge-yellow { background: #eab308; color: #0f172a; }
+        .badge-blue { background: #3b82f6; color: #fff; }
+        .badge-purple { background: #a855f7; color: #fff; }
+        .badge-red { background: #ef4444; color: #fff; }
+        .badge-gray { background: #475569; color: #e2e8f0; }
+        .loading { color: #64748b; text-align: center; padding: 2rem; }
+        .error { color: #ef4444; text-align: center; padding: 2rem; }
+        .empty-state {
+            color: #64748b;
+            font-size: 0.85rem;
+            padding: 1rem 0;
+            text-align: center;
+        }
+        canvas {
+            width: 100% !important;
+            height: 200px !important;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th {
+            text-align: left;
+            color: #64748b;
+            font-weight: 500;
+            padding: 0.5rem 0.5rem;
+            border-bottom: 1px solid #334155;
+        }
+        td {
+            padding: 0.5rem 0.5rem;
+            border-bottom: 1px solid #1e293b;
+        }
+        tr.clickable { cursor: pointer; }
+        tr.clickable:hover { background: #334155; }
+        .savings-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .savings-track {
+            flex: 1;
+            height: 12px;
+            background: #334155;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .savings-fill {
+            height: 100%;
+            border-radius: 4px;
+            background: #22c55e;
+            transition: width 0.3s;
+        }
+        .savings-value {
+            font-size: 0.8rem;
+            font-weight: 600;
+            min-width: 45px;
+            text-align: right;
+        }
+        #detail-panel {
+            display: none;
+            grid-column: 1 / -1;
+        }
+        .detail-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .detail-close {
+            background: none;
+            border: 1px solid #334155;
+            color: #94a3b8;
+            padding: 0.3rem 0.6rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .detail-close:hover { color: #e2e8f0; border-color: #64748b; }
+        .detail-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin-top: 0.75rem;
+        }
+        .detail-stat {
+            text-align: center;
+        }
+        .detail-stat .val {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #3b82f6;
+        }
+        .detail-stat .lbl {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-top: 0.25rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>Engram Dashboard</h1>
+            <span class="subtitle">Semantic Context Engine &mdash; Benchmark Dashboard</span>
+        </div>
+    </header>
+
+    <nav>
+        <a href="/dashboard/">Live Session</a>
+        <a href="/dashboard/health.html">Index Health</a>
+        <a href="/dashboard/knowledge.html">Knowledge</a>
+        <a href="/dashboard/search.html">Search Analytics</a>
+        <a href="/dashboard/benchmark.html" class="active">Benchmarks</a>
+    </nav>
+
+    <div id="loading" class="loading">Loading benchmark data...</div>
+    <div id="error" class="error" style="display:none"></div>
+
+    <div class="grid" id="main-grid" style="display:none">
+        <div class="card">
+            <h2>Active Benchmark Sessions</h2>
+            <div class="card-body" id="active-sessions">
+                <div class="empty-state">No active benchmark sessions</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Summary</h2>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span class="stat-label">Total Runs</span>
+                    <span class="stat-value" id="total-runs">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Active Sessions</span>
+                    <span class="stat-value" id="active-count">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Token Savings</span>
+                    <span class="stat-value" id="avg-savings">0%</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Best Token Savings</span>
+                    <span class="stat-value" id="best-savings">0%</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card chart-card">
+            <h2>Token Savings Trend</h2>
+            <div class="card-body">
+                <canvas id="savings-chart"></canvas>
+            </div>
+        </div>
+
+        <div class="card full-width">
+            <h2>Historical Runs</h2>
+            <div class="card-body" id="historical-runs">
+                <div class="empty-state">No benchmark runs recorded</div>
+            </div>
+        </div>
+
+        <div id="detail-panel" class="card">
+            <div class="detail-header">
+                <h2 id="detail-title">Run Details</h2>
+                <button class="detail-close" onclick="closeDetail()">Close</button>
+            </div>
+            <div class="card-body">
+                <div class="detail-stats">
+                    <div class="detail-stat">
+                        <div class="val" id="detail-baseline">0</div>
+                        <div class="lbl">Baseline Tokens</div>
+                    </div>
+                    <div class="detail-stat">
+                        <div class="val" id="detail-assisted">0</div>
+                        <div class="lbl">Assisted Tokens</div>
+                    </div>
+                    <div class="detail-stat">
+                        <div class="val" id="detail-savings">0%</div>
+                        <div class="lbl">Token Savings</div>
+                    </div>
+                    <div class="detail-stat">
+                        <div class="val" id="detail-duration">0s</div>
+                        <div class="lbl">Duration</div>
+                    </div>
+                </div>
+                <div style="margin-top: 1rem;">
+                    <div class="stat-row">
+                        <span class="stat-label">Session ID</span>
+                        <span class="stat-value" id="detail-session-id"></span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Task</span>
+                        <span class="stat-value" id="detail-task"></span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Started At</span>
+                        <span class="stat-value" id="detail-started"></span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Events</span>
+                        <span class="stat-value" id="detail-events"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var loadingEl = document.getElementById('loading');
+        var errorEl = document.getElementById('error');
+        var mainGrid = document.getElementById('main-grid');
+        var allRuns = [];
+
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(text));
+            return div.innerHTML;
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '—';
+            try {
+                var d = new Date(ts);
+                return d.toLocaleString();
+            } catch (e) {
+                return ts;
+            }
+        }
+
+        function formatDuration(ms) {
+            if (ms < 1000) return ms + 'ms';
+            var s = Math.round(ms / 1000);
+            if (s < 60) return s + 's';
+            var m = Math.floor(s / 60);
+            s = s % 60;
+            return m + 'm ' + s + 's';
+        }
+
+        function formatTokens(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return n.toString();
+        }
+
+        function statusBadge(status) {
+            var cls = 'badge-gray';
+            if (status === 'running') cls = 'badge-blue';
+            else if (status === 'complete') cls = 'badge-green';
+            else if (status === 'failed') cls = 'badge-red';
+            return '<span class="badge ' + cls + '">' + escapeHtml(status) + '</span>';
+        }
+
+        function renderActiveSessions(sessions) {
+            var el = document.getElementById('active-sessions');
+            document.getElementById('active-count').textContent = sessions.length;
+
+            if (sessions.length === 0) {
+                el.innerHTML = '<div class="empty-state">No active benchmark sessions</div>';
+                return;
+            }
+            var html = '<table><thead><tr><th>Task</th><th>Status</th><th>Events</th><th>Started</th></tr></thead><tbody>';
+            for (var i = 0; i < sessions.length; i++) {
+                var s = sessions[i];
+                html += '<tr>';
+                html += '<td>' + escapeHtml(s.task) + '</td>';
+                html += '<td>' + statusBadge(s.status) + '</td>';
+                html += '<td>' + s.event_count + '</td>';
+                html += '<td>' + formatTimestamp(s.started_at) + '</td>';
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        }
+
+        function renderHistoricalRuns(runs) {
+            var el = document.getElementById('historical-runs');
+            allRuns = runs;
+
+            if (runs.length === 0) {
+                el.innerHTML = '<div class="empty-state">No benchmark runs recorded</div>';
+                return;
+            }
+            var html = '<table><thead><tr><th>Task</th><th>Status</th><th>Token Savings</th><th>Duration</th><th>Events</th><th>Started</th></tr></thead><tbody>';
+            for (var i = 0; i < runs.length; i++) {
+                var r = runs[i];
+                var pct = r.token_savings_pct.toFixed(1);
+                html += '<tr class="clickable" onclick="showDetail(\'' + escapeHtml(r.session_id) + '\')">';
+                html += '<td>' + escapeHtml(r.task) + '</td>';
+                html += '<td>' + statusBadge(r.status) + '</td>';
+                html += '<td><div class="savings-bar"><div class="savings-track"><div class="savings-fill" style="width:' + Math.min(pct, 100) + '%"></div></div><span class="savings-value">' + pct + '%</span></div></td>';
+                html += '<td>' + formatDuration(r.duration_ms) + '</td>';
+                html += '<td>' + r.event_count + '</td>';
+                html += '<td>' + formatTimestamp(r.started_at) + '</td>';
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        }
+
+        function renderSummary(data) {
+            var total = data.historical_runs.length + data.active_sessions.length;
+            document.getElementById('total-runs').textContent = total;
+
+            var savings = data.historical_runs.map(function(r) { return r.token_savings_pct; });
+            if (savings.length > 0) {
+                var avg = savings.reduce(function(a, b) { return a + b; }, 0) / savings.length;
+                var best = Math.max.apply(null, savings);
+                document.getElementById('avg-savings').textContent = avg.toFixed(1) + '%';
+                document.getElementById('best-savings').textContent = best.toFixed(1) + '%';
+            } else {
+                document.getElementById('avg-savings').textContent = '—';
+                document.getElementById('best-savings').textContent = '—';
+            }
+        }
+
+        function renderSavingsChart(trend) {
+            var canvas = document.getElementById('savings-chart');
+            var ctx = canvas.getContext('2d');
+            var w = canvas.parentElement.clientWidth;
+            var h = 200;
+            canvas.width = w * (window.devicePixelRatio || 1);
+            canvas.height = h * (window.devicePixelRatio || 1);
+            canvas.style.width = w + 'px';
+            canvas.style.height = h + 'px';
+            ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (trend.length === 0) {
+                ctx.fillStyle = '#64748b';
+                ctx.font = '14px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No trend data yet', w / 2, h / 2);
+                return;
+            }
+
+            var pad = { top: 20, right: 20, bottom: 30, left: 50 };
+            var cw = w - pad.left - pad.right;
+            var ch = h - pad.top - pad.bottom;
+
+            var maxVal = Math.max.apply(null, trend.map(function(p) { return p.savings_pct; }));
+            maxVal = Math.max(maxVal, 10);
+            maxVal = Math.ceil(maxVal / 10) * 10;
+
+            // Grid lines
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1;
+            for (var g = 0; g <= 4; g++) {
+                var gy = pad.top + ch - (g / 4) * ch;
+                ctx.beginPath();
+                ctx.moveTo(pad.left, gy);
+                ctx.lineTo(pad.left + cw, gy);
+                ctx.stroke();
+                ctx.fillStyle = '#64748b';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(((g / 4) * maxVal).toFixed(0) + '%', pad.left - 5, gy + 4);
+            }
+
+            // Data line
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (var i = 0; i < trend.length; i++) {
+                var x = pad.left + (trend.length === 1 ? cw / 2 : (i / (trend.length - 1)) * cw);
+                var y = pad.top + ch - (trend[i].savings_pct / maxVal) * ch;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Data points
+            ctx.fillStyle = '#22c55e';
+            for (var j = 0; j < trend.length; j++) {
+                var px = pad.left + (trend.length === 1 ? cw / 2 : (j / (trend.length - 1)) * cw);
+                var py = pad.top + ch - (trend[j].savings_pct / maxVal) * ch;
+                ctx.beginPath();
+                ctx.arc(px, py, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // X-axis labels
+            ctx.fillStyle = '#64748b';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            var step = Math.max(1, Math.floor(trend.length / 6));
+            for (var k = 0; k < trend.length; k += step) {
+                var lx = pad.left + (trend.length === 1 ? cw / 2 : (k / (trend.length - 1)) * cw);
+                var label = trend[k].session_id.length > 8 ? trend[k].session_id.substring(0, 8) : trend[k].session_id;
+                ctx.fillText(label, lx, h - 5);
+            }
+        }
+
+        function renderData(data) {
+            renderActiveSessions(data.active_sessions);
+            renderHistoricalRuns(data.historical_runs);
+            renderSummary(data);
+            renderSavingsChart(data.token_savings_trend);
+        }
+
+        // Detail panel
+        window.showDetail = function(sessionId) {
+            var run = null;
+            for (var i = 0; i < allRuns.length; i++) {
+                if (allRuns[i].session_id === sessionId) { run = allRuns[i]; break; }
+            }
+            if (!run) return;
+
+            document.getElementById('detail-title').textContent = 'Run Details — ' + run.task;
+            document.getElementById('detail-baseline').textContent = formatTokens(run.baseline_tokens);
+            document.getElementById('detail-assisted').textContent = formatTokens(run.assisted_tokens);
+            document.getElementById('detail-savings').textContent = run.token_savings_pct.toFixed(1) + '%';
+            document.getElementById('detail-duration').textContent = formatDuration(run.duration_ms);
+            document.getElementById('detail-session-id').textContent = run.session_id;
+            document.getElementById('detail-task').textContent = run.task;
+            document.getElementById('detail-started').textContent = formatTimestamp(run.started_at);
+            document.getElementById('detail-events').textContent = run.event_count;
+
+            document.getElementById('detail-panel').style.display = '';
+        };
+
+        window.closeDetail = function() {
+            document.getElementById('detail-panel').style.display = 'none';
+        };
+
+        function fetchData() {
+            fetch('/api/benchmarks')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = 'none';
+                    mainGrid.style.display = '';
+                    renderData(data);
+                })
+                .catch(function(err) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = '';
+                    errorEl.textContent = 'Failed to load benchmark data: ' + err.message;
+                });
+        }
+
+        fetchData();
+        setInterval(fetchData, 30000);
+    })();
+    </script>
+</body>
+</html>

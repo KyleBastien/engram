@@ -151,6 +151,36 @@ pub struct SearchAnalyticsSnapshot {
     pub avg_search_time_ms: f64,
 }
 
+/// Summary of a single benchmark run.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BenchmarkRunSummary {
+    pub session_id: String,
+    pub task: String,
+    pub started_at: String,
+    pub status: String,
+    pub baseline_tokens: u64,
+    pub assisted_tokens: u64,
+    pub token_savings_pct: f64,
+    pub duration_ms: u64,
+    pub event_count: usize,
+}
+
+/// A single data point for token savings trend over time.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenSavingsPoint {
+    pub session_id: String,
+    pub completed_at: String,
+    pub savings_pct: f64,
+}
+
+/// Snapshot of benchmark data served via REST API.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BenchmarkSnapshot {
+    pub active_sessions: Vec<BenchmarkRunSummary>,
+    pub historical_runs: Vec<BenchmarkRunSummary>,
+    pub token_savings_trend: Vec<TokenSavingsPoint>,
+}
+
 /// Snapshot of index health data served via REST API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthSnapshot {
@@ -163,13 +193,14 @@ pub struct HealthSnapshot {
     pub store_path: String,
 }
 
-/// Shared state for the dashboard: event broadcaster + health data + knowledge data + search analytics.
+/// Shared state for the dashboard: event broadcaster + health data + knowledge data + search analytics + benchmarks.
 #[derive(Clone)]
 pub struct DashboardState {
     pub broadcaster: EventBroadcaster,
     pub health: Arc<RwLock<HealthSnapshot>>,
     pub knowledge: Arc<RwLock<KnowledgeSnapshot>>,
     pub search_analytics: Arc<RwLock<SearchAnalyticsSnapshot>>,
+    pub benchmarks: Arc<RwLock<BenchmarkSnapshot>>,
 }
 
 impl DashboardState {
@@ -179,6 +210,7 @@ impl DashboardState {
             health: Arc::new(RwLock::new(health)),
             knowledge: Arc::new(RwLock::new(KnowledgeSnapshot::default())),
             search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
+            benchmarks: Arc::new(RwLock::new(BenchmarkSnapshot::default())),
         }
     }
 
@@ -192,6 +224,7 @@ impl DashboardState {
             health: Arc::new(RwLock::new(health)),
             knowledge: Arc::new(RwLock::new(knowledge)),
             search_analytics: Arc::new(RwLock::new(SearchAnalyticsSnapshot::default())),
+            benchmarks: Arc::new(RwLock::new(BenchmarkSnapshot::default())),
         }
     }
 }
@@ -255,6 +288,7 @@ pub fn build_router_with_state(state: DashboardState) -> Router {
         .route("/api/health", get(health_handler))
         .route("/api/knowledge", get(knowledge_handler))
         .route("/api/search_analytics", get(search_analytics_handler))
+        .route("/api/benchmarks", get(benchmarks_handler))
         .nest("/dashboard", dashboard_routes)
         .with_state(shared)
 }
@@ -285,6 +319,13 @@ async fn search_analytics_handler(
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
     let snapshot = state.search_analytics.read().await;
+    Json(snapshot.clone())
+}
+
+async fn benchmarks_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.benchmarks.read().await;
     Json(snapshot.clone())
 }
 
@@ -837,6 +878,90 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body = resp.text().await.unwrap();
         assert!(body.contains("Search Analytics"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_snapshot_default_empty() {
+        let snapshot = BenchmarkSnapshot::default();
+        assert!(snapshot.active_sessions.is_empty());
+        assert!(snapshot.historical_runs.is_empty());
+        assert!(snapshot.token_savings_trend.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_benchmarks_api_returns_json() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        {
+            let mut benchmarks = state.benchmarks.write().await;
+            benchmarks.active_sessions = vec![BenchmarkRunSummary {
+                session_id: "sess-001".to_string(),
+                task: "Implement auth".to_string(),
+                started_at: "2026-03-10T10:00:00Z".to_string(),
+                status: "running".to_string(),
+                baseline_tokens: 0,
+                assisted_tokens: 0,
+                token_savings_pct: 0.0,
+                duration_ms: 0,
+                event_count: 15,
+            }];
+            benchmarks.historical_runs = vec![BenchmarkRunSummary {
+                session_id: "sess-000".to_string(),
+                task: "Add tests".to_string(),
+                started_at: "2026-03-09T08:00:00Z".to_string(),
+                status: "complete".to_string(),
+                baseline_tokens: 5000,
+                assisted_tokens: 3200,
+                token_savings_pct: 36.0,
+                duration_ms: 120000,
+                event_count: 42,
+            }];
+            benchmarks.token_savings_trend = vec![TokenSavingsPoint {
+                session_id: "sess-000".to_string(),
+                completed_at: "2026-03-09T10:00:00Z".to_string(),
+                savings_pct: 36.0,
+            }];
+        }
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/benchmarks"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["active_sessions"][0]["session_id"], "sess-001");
+        assert_eq!(body["active_sessions"][0]["event_count"], 15);
+        assert_eq!(body["historical_runs"][0]["task"], "Add tests");
+        assert_eq!(body["historical_runs"][0]["token_savings_pct"], 36.0);
+        assert_eq!(body["token_savings_trend"][0]["savings_pct"], 36.0);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_embedded_assets_contain_benchmark() {
+        assert!(Assets::get("benchmark.html").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_html_served() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/dashboard/benchmark.html"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("Benchmark Dashboard"));
 
         handle.abort();
     }
