@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engram Dashboard &mdash; Knowledge Activity</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+        }
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.5rem; }
+        header .subtitle { color: #94a3b8; font-size: 0.9rem; }
+        nav {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        nav a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            border: 1px solid #334155;
+        }
+        nav a:hover { color: #e2e8f0; border-color: #64748b; }
+        nav a.active { color: #3b82f6; border-color: #3b82f6; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            flex: 1;
+            min-height: 0;
+        }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .card h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }
+        .card-body {
+            flex: 1;
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .writebacks-card { grid-column: 1 / -1; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th {
+            text-align: left;
+            color: #64748b;
+            font-weight: 500;
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid #334155;
+        }
+        td {
+            padding: 0.4rem 0.5rem;
+            border-bottom: 1px solid #1e293b;
+        }
+        .empty-state {
+            color: #64748b;
+            font-size: 0.85rem;
+            padding: 1rem 0;
+            text-align: center;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-green { background: #22c55e; color: #0f172a; }
+        .badge-red { background: #ef4444; color: #fff; }
+        .badge-yellow { background: #eab308; color: #0f172a; }
+        .badge-blue { background: #3b82f6; color: #fff; }
+        .badge-purple { background: #a78bfa; color: #0f172a; }
+        .badge-gray { background: #475569; color: #e2e8f0; }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.4rem 0;
+            font-size: 0.85rem;
+        }
+        .stat-label { color: #64748b; }
+        .stat-value { color: #e2e8f0; font-weight: 500; }
+        .loading { color: #64748b; text-align: center; padding: 2rem; }
+        .error { color: #ef4444; text-align: center; padding: 2rem; }
+        .category-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.3rem 0;
+        }
+        .category-name {
+            min-width: 100px;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        .category-fill {
+            height: 20px;
+            border-radius: 3px;
+            min-width: 4px;
+            transition: width 0.3s;
+        }
+        .category-count {
+            font-size: 0.8rem;
+            color: #e2e8f0;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>Engram Dashboard</h1>
+            <span class="subtitle">Semantic Context Engine &mdash; Knowledge Activity</span>
+        </div>
+    </header>
+
+    <nav>
+        <a href="/dashboard/">Live Session</a>
+        <a href="/dashboard/health.html">Index Health</a>
+        <a href="/dashboard/knowledge.html" class="active">Knowledge</a>
+    </nav>
+
+    <div id="loading" class="loading">Loading knowledge data...</div>
+    <div id="error" class="error" style="display:none"></div>
+
+    <div class="grid" id="main-grid" style="display:none">
+        <div class="card">
+            <h2>Items by Category</h2>
+            <div class="card-body" id="categories-body">
+                <div id="categories-list"></div>
+                <div class="empty-state" id="categories-empty" style="display:none">No knowledge items</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Onboarding Status</h2>
+            <div class="card-body" id="onboarding-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Source</th>
+                            <th>Status</th>
+                            <th>Chunks</th>
+                        </tr>
+                    </thead>
+                    <tbody id="onboarding-table"></tbody>
+                </table>
+                <div class="empty-state" id="onboarding-empty" style="display:none">No source repos</div>
+            </div>
+        </div>
+
+        <div class="card writebacks-card">
+            <h2>Recent Write-Backs</h2>
+            <div class="card-body" id="writebacks-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Kind</th>
+                            <th>Title</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="writebacks-table"></tbody>
+                </table>
+                <div class="empty-state" id="writebacks-empty" style="display:none">No recent write-backs</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var loadingEl = document.getElementById('loading');
+        var errorEl = document.getElementById('error');
+        var mainGrid = document.getElementById('main-grid');
+
+        var categoryColors = {
+            decision: '#3b82f6',
+            lesson: '#22c55e',
+            pattern: '#a78bfa',
+            glossary: '#eab308'
+        };
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            try {
+                var d = new Date(ts);
+                if (isNaN(d.getTime())) return ts;
+                return d.toLocaleString();
+            } catch (e) {
+                return ts;
+            }
+        }
+
+        function kindBadge(kind) {
+            switch (kind) {
+                case 'decision': return '<span class="badge badge-blue">decision</span>';
+                case 'lesson': return '<span class="badge badge-green">lesson</span>';
+                case 'pattern': return '<span class="badge badge-purple">pattern</span>';
+                case 'glossary': return '<span class="badge badge-yellow">glossary</span>';
+                default: return '<span class="badge badge-gray">' + escapeHtml(kind) + '</span>';
+            }
+        }
+
+        function statusBadge(status) {
+            switch (status) {
+                case 'complete': return '<span class="badge badge-green">complete</span>';
+                case 'in_progress': return '<span class="badge badge-yellow">in progress</span>';
+                case 'not_started': return '<span class="badge badge-gray">not started</span>';
+                default: return '<span class="badge badge-gray">' + escapeHtml(status) + '</span>';
+            }
+        }
+
+        function renderKnowledge(data) {
+            // Items by category
+            var catList = document.getElementById('categories-list');
+            var catEmpty = document.getElementById('categories-empty');
+            var cats = data.items_by_category || {};
+            var catKeys = Object.keys(cats);
+
+            if (catKeys.length === 0) {
+                catList.innerHTML = '';
+                catEmpty.style.display = 'block';
+            } else {
+                catEmpty.style.display = 'none';
+                var maxCount = 0;
+                for (var i = 0; i < catKeys.length; i++) {
+                    if (cats[catKeys[i]] > maxCount) maxCount = cats[catKeys[i]];
+                }
+                if (maxCount === 0) maxCount = 1;
+
+                var catHtml = '';
+                catKeys.sort();
+                for (var j = 0; j < catKeys.length; j++) {
+                    var key = catKeys[j];
+                    var count = cats[key];
+                    var pct = (count / maxCount) * 100;
+                    var color = categoryColors[key] || '#64748b';
+                    catHtml += '<div class="category-bar">'
+                        + '<span class="category-name">' + escapeHtml(key) + '</span>'
+                        + '<div style="flex:1;background:#334155;border-radius:3px;overflow:hidden;height:20px">'
+                        + '<div class="category-fill" style="width:' + pct + '%;background:' + color + '"></div>'
+                        + '</div>'
+                        + '<span class="category-count">' + count + '</span>'
+                        + '</div>';
+                }
+                catList.innerHTML = catHtml;
+            }
+
+            // Onboarding status
+            var onbTable = document.getElementById('onboarding-table');
+            var onbEmpty = document.getElementById('onboarding-empty');
+            var onboarding = data.onboarding_status || [];
+
+            if (onboarding.length === 0) {
+                onbTable.innerHTML = '';
+                onbEmpty.style.display = 'block';
+            } else {
+                onbEmpty.style.display = 'none';
+                var onbHtml = '';
+                for (var k = 0; k < onboarding.length; k++) {
+                    var o = onboarding[k];
+                    onbHtml += '<tr>'
+                        + '<td>' + escapeHtml(o.source) + '</td>'
+                        + '<td>' + statusBadge(o.status) + '</td>'
+                        + '<td>' + (o.chunks_indexed || 0).toLocaleString() + '</td>'
+                        + '</tr>';
+                }
+                onbTable.innerHTML = onbHtml;
+            }
+
+            // Recent write-backs
+            var wbTable = document.getElementById('writebacks-table');
+            var wbEmpty = document.getElementById('writebacks-empty');
+            var writebacks = data.recent_writebacks || [];
+
+            if (writebacks.length === 0) {
+                wbTable.innerHTML = '';
+                wbEmpty.style.display = 'block';
+            } else {
+                wbEmpty.style.display = 'none';
+                var wbHtml = '';
+                for (var m = 0; m < writebacks.length; m++) {
+                    var wb = writebacks[m];
+                    wbHtml += '<tr>'
+                        + '<td>' + kindBadge(wb.kind) + '</td>'
+                        + '<td>' + escapeHtml(wb.title) + '</td>'
+                        + '<td>' + formatTimestamp(wb.timestamp) + '</td>'
+                        + '</tr>';
+                }
+                wbTable.innerHTML = wbHtml;
+            }
+        }
+
+        function fetchKnowledge() {
+            fetch('/api/knowledge')
+                .then(function(resp) {
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    return resp.json();
+                })
+                .then(function(data) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = 'none';
+                    mainGrid.style.display = 'grid';
+                    renderKnowledge(data);
+                })
+                .catch(function(err) {
+                    loadingEl.style.display = 'none';
+                    errorEl.style.display = 'block';
+                    errorEl.textContent = 'Failed to load knowledge data: ' + err.message;
+                });
+        }
+
+        // Initial fetch
+        fetchKnowledge();
+
+        // Refresh every 30 seconds
+        setInterval(fetchKnowledge, 30000);
+    })();
+    </script>
+</body>
+</html>

@@ -109,6 +109,30 @@ pub struct CacheStatus {
     pub size_bytes: u64,
 }
 
+/// A single knowledge write-back event.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KnowledgeWriteback {
+    pub kind: String,
+    pub title: String,
+    pub timestamp: String,
+}
+
+/// Onboarding status for a source repository.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnboardingStatus {
+    pub source: String,
+    pub status: String,
+    pub chunks_indexed: usize,
+}
+
+/// Snapshot of knowledge activity data served via REST API.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KnowledgeSnapshot {
+    pub items_by_category: std::collections::HashMap<String, usize>,
+    pub recent_writebacks: Vec<KnowledgeWriteback>,
+    pub onboarding_status: Vec<OnboardingStatus>,
+}
+
 /// Snapshot of index health data served via REST API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthSnapshot {
@@ -121,11 +145,12 @@ pub struct HealthSnapshot {
     pub store_path: String,
 }
 
-/// Shared state for the dashboard: event broadcaster + health data.
+/// Shared state for the dashboard: event broadcaster + health data + knowledge data.
 #[derive(Clone)]
 pub struct DashboardState {
     pub broadcaster: EventBroadcaster,
     pub health: Arc<RwLock<HealthSnapshot>>,
+    pub knowledge: Arc<RwLock<KnowledgeSnapshot>>,
 }
 
 impl DashboardState {
@@ -133,6 +158,19 @@ impl DashboardState {
         Self {
             broadcaster,
             health: Arc::new(RwLock::new(health)),
+            knowledge: Arc::new(RwLock::new(KnowledgeSnapshot::default())),
+        }
+    }
+
+    pub fn with_knowledge(
+        broadcaster: EventBroadcaster,
+        health: HealthSnapshot,
+        knowledge: KnowledgeSnapshot,
+    ) -> Self {
+        Self {
+            broadcaster,
+            health: Arc::new(RwLock::new(health)),
+            knowledge: Arc::new(RwLock::new(knowledge)),
         }
     }
 }
@@ -194,6 +232,7 @@ pub fn build_router_with_state(state: DashboardState) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/health", get(health_handler))
+        .route("/api/knowledge", get(knowledge_handler))
         .nest("/dashboard", dashboard_routes)
         .with_state(shared)
 }
@@ -210,6 +249,13 @@ async fn health_handler(
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
     let snapshot = state.health.read().await;
+    Json(snapshot.clone())
+}
+
+async fn knowledge_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.knowledge.read().await;
     Json(snapshot.clone())
 }
 
@@ -234,8 +280,12 @@ async fn index_handler() -> impl IntoResponse {
 }
 
 async fn static_handler(uri: Uri) -> impl IntoResponse {
-    // Strip the /dashboard/ prefix to get the asset path
-    let path = uri.path().trim_start_matches("/dashboard/");
+    // Strip prefix to get the asset path — axum nest() strips the /dashboard prefix,
+    // leaving paths like /knowledge.html; trim any leading slash to match asset filenames.
+    let path = uri
+        .path()
+        .trim_start_matches("/dashboard/")
+        .trim_start_matches('/');
 
     match Assets::get(path) {
         Some(content) => {
@@ -596,5 +646,91 @@ mod tests {
         let state = DashboardState::new(broadcaster, HealthSnapshot::default());
         let health = state.health.read().await;
         assert_eq!(health.total_chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_snapshot_default_empty() {
+        let snapshot = KnowledgeSnapshot::default();
+        assert!(snapshot.items_by_category.is_empty());
+        assert!(snapshot.recent_writebacks.is_empty());
+        assert!(snapshot.onboarding_status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_api_returns_json() {
+        let mut items = std::collections::HashMap::new();
+        items.insert("decision".to_string(), 5);
+        items.insert("lesson".to_string(), 3);
+        items.insert("pattern".to_string(), 2);
+
+        let knowledge = KnowledgeSnapshot {
+            items_by_category: items,
+            recent_writebacks: vec![
+                KnowledgeWriteback {
+                    kind: "decision".to_string(),
+                    title: "Use Rust".to_string(),
+                    timestamp: "2026-03-10T00:00:00Z".to_string(),
+                },
+                KnowledgeWriteback {
+                    kind: "lesson".to_string(),
+                    title: "Pin dependencies".to_string(),
+                    timestamp: "2026-03-09T12:00:00Z".to_string(),
+                },
+            ],
+            onboarding_status: vec![OnboardingStatus {
+                source: "my-repo".to_string(),
+                status: "complete".to_string(),
+                chunks_indexed: 150,
+            }],
+        };
+
+        let state = DashboardState::with_knowledge(
+            EventBroadcaster::default(),
+            HealthSnapshot::default(),
+            knowledge,
+        );
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/knowledge"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["items_by_category"]["decision"], 5);
+        assert_eq!(body["items_by_category"]["lesson"], 3);
+        assert_eq!(body["recent_writebacks"][0]["kind"], "decision");
+        assert_eq!(body["recent_writebacks"][0]["title"], "Use Rust");
+        assert_eq!(body["onboarding_status"][0]["source"], "my-repo");
+        assert_eq!(body["onboarding_status"][0]["status"], "complete");
+        assert_eq!(body["onboarding_status"][0]["chunks_indexed"], 150);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_embedded_assets_contain_knowledge() {
+        assert!(Assets::get("knowledge.html").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_html_served() {
+        let state = DashboardState::new(EventBroadcaster::default(), HealthSnapshot::default());
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/dashboard/knowledge.html"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("Knowledge Activity"));
+
+        handle.abort();
     }
 }
