@@ -328,6 +328,9 @@ async fn handle_engram_search(
         .and_then(|a| a.get("compact"))
         .and_then(|c| c.as_bool())
         .unwrap_or(false);
+    let repo_filter = args
+        .and_then(|a| a.get("repo"))
+        .and_then(|r| r.as_str());
 
     // Validate scope
     if !matches!(scope, "code" | "docs" | "all" | "knowledge") {
@@ -380,6 +383,24 @@ async fn handle_engram_search(
         }
     } else {
         Vec::new()
+    };
+
+    // Apply repo filter if specified
+    let code_doc_results: Vec<SearchResult> = if let Some(repo) = repo_filter {
+        code_doc_results
+            .into_iter()
+            .filter(|r| r.repo == repo)
+            .collect()
+    } else {
+        code_doc_results
+    };
+    let knowledge_results: Vec<SearchResult> = if let Some(repo) = repo_filter {
+        knowledge_results
+            .into_iter()
+            .filter(|r| r.repo == repo)
+            .collect()
+    } else {
+        knowledge_results
     };
 
     let now = chrono::Utc::now();

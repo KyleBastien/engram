@@ -2,12 +2,13 @@ use engram_core::ChunkMetadata;
 use std::collections::HashMap;
 
 /// In-memory metadata indexes for direct O(1) lookups by chunk ID, file path,
-/// symbol name, and tag.
+/// symbol name, tag, and source repo.
 pub struct MetadataIndex {
     by_id: HashMap<String, ChunkMetadata>,
     by_file: HashMap<String, Vec<ChunkMetadata>>,
     by_symbol: HashMap<String, Vec<ChunkMetadata>>,
     by_tag: HashMap<String, Vec<ChunkMetadata>>,
+    by_repo: HashMap<String, Vec<ChunkMetadata>>,
 }
 
 impl MetadataIndex {
@@ -20,13 +21,19 @@ impl MetadataIndex {
         let mut by_file: HashMap<String, Vec<ChunkMetadata>> = HashMap::new();
         let mut by_symbol: HashMap<String, Vec<ChunkMetadata>> = HashMap::new();
         let mut by_tag: HashMap<String, Vec<ChunkMetadata>> = HashMap::new();
+        let mut by_repo: HashMap<String, Vec<ChunkMetadata>> = HashMap::new();
 
         for chunk in chunks {
             by_id.insert(chunk.chunk_id.clone(), chunk.clone());
 
-            let file_path = extract_file_path(&chunk.chunk_id);
+            let (repo, file_path) = extract_repo_file(&chunk.chunk_id);
             by_file
                 .entry(file_path)
+                .or_default()
+                .push(chunk.clone());
+
+            by_repo
+                .entry(repo)
                 .or_default()
                 .push(chunk.clone());
 
@@ -48,6 +55,7 @@ impl MetadataIndex {
             by_file,
             by_symbol,
             by_tag,
+            by_repo,
         }
     }
 
@@ -70,19 +78,27 @@ impl MetadataIndex {
     pub fn lookup_by_tag(&self, tag: &str) -> Option<&[ChunkMetadata]> {
         self.by_tag.get(tag).map(|v| v.as_slice())
     }
+
+    /// Look up all chunks belonging to a source repo.
+    pub fn lookup_by_repo(&self, repo: &str) -> Option<&[ChunkMetadata]> {
+        self.by_repo.get(repo).map(|v| v.as_slice())
+    }
 }
 
-/// Extract the file path component from a chunk_id.
+/// Extract the source repo and file path components from a chunk_id.
 ///
 /// chunk_id format: `{source_name}#{relative_path}#{chunk_name}`
-/// Returns the relative_path portion between the first and last `#`.
-/// If the format doesn't match, returns the full chunk_id as fallback.
-fn extract_file_path(chunk_id: &str) -> String {
+/// Returns (source_name, relative_path).
+/// If the format doesn't match, returns ("unknown", full chunk_id) as fallback.
+fn extract_repo_file(chunk_id: &str) -> (String, String) {
     let first = chunk_id.find('#');
     let last = chunk_id.rfind('#');
     match (first, last) {
-        (Some(f), Some(l)) if f < l => chunk_id[f + 1..l].to_string(),
-        _ => chunk_id.to_string(),
+        (Some(f), Some(l)) if f < l => (
+            chunk_id[..f].to_string(),
+            chunk_id[f + 1..l].to_string(),
+        ),
+        _ => ("unknown".to_string(), chunk_id.to_string()),
     }
 }
 
@@ -192,26 +208,52 @@ mod tests {
         assert!(index.lookup_by_file("anything").is_none());
         assert!(index.lookup_by_symbol("anything").is_none());
         assert!(index.lookup_by_tag("anything").is_none());
+        assert!(index.lookup_by_repo("anything").is_none());
     }
 
     #[test]
-    fn extract_file_path_from_chunk_id() {
+    fn lookup_by_repo_groups_chunks() {
+        let chunks = vec![
+            make_chunk("repo-a#src/lib.rs#foo", "foo", ChunkKind::Function, vec![]),
+            make_chunk("repo-a#src/main.rs#main", "main", ChunkKind::Function, vec![]),
+            make_chunk("repo-b#src/lib.rs#bar", "bar", ChunkKind::Function, vec![]),
+        ];
+        let index = MetadataIndex::build(&chunks);
+
+        let repo_a_chunks = index.lookup_by_repo("repo-a").unwrap();
+        assert_eq!(repo_a_chunks.len(), 2);
+
+        let repo_b_chunks = index.lookup_by_repo("repo-b").unwrap();
+        assert_eq!(repo_b_chunks.len(), 1);
+        assert_eq!(repo_b_chunks[0].name, "bar");
+
+        assert!(index.lookup_by_repo("nonexistent").is_none());
+    }
+
+    #[test]
+    fn extract_repo_file_from_chunk_id() {
         assert_eq!(
-            extract_file_path("repo#src/lib.rs#foo"),
-            "src/lib.rs"
+            extract_repo_file("repo#src/lib.rs#foo"),
+            ("repo".to_string(), "src/lib.rs".to_string())
         );
         assert_eq!(
-            extract_file_path("my-repo#src/deep/nested/file.ts#MyClass"),
-            "src/deep/nested/file.ts"
+            extract_repo_file("my-repo#src/deep/nested/file.ts#MyClass"),
+            ("my-repo".to_string(), "src/deep/nested/file.ts".to_string())
         );
     }
 
     #[test]
-    fn extract_file_path_fallback() {
-        // No hash separators — returns full string as fallback
-        assert_eq!(extract_file_path("no-hash"), "no-hash");
-        // Single hash — no second separator, returns full string
-        assert_eq!(extract_file_path("one#hash"), "one#hash");
+    fn extract_repo_file_fallback() {
+        // No hash separators — returns ("unknown", full string) as fallback
+        assert_eq!(
+            extract_repo_file("no-hash"),
+            ("unknown".to_string(), "no-hash".to_string())
+        );
+        // Single hash — no second separator, returns fallback
+        assert_eq!(
+            extract_repo_file("one#hash"),
+            ("unknown".to_string(), "one#hash".to_string())
+        );
     }
 
     #[test]

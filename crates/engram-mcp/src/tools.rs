@@ -25,6 +25,10 @@ pub fn phase1_tool_definitions() -> Vec<serde_json::Value> {
                     "compact": {
                         "type": "boolean",
                         "description": "If true, omit signatures and truncate long names"
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Filter results to a specific source repo name"
                     }
                 },
                 "required": ["query"]
