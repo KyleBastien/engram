@@ -9,7 +9,7 @@ use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig}
 use engram_ingest::{IngestPipeline, IngestReport};
 use engram_mcp::McpServer;
 use engram_query::IndexManager;
-use engram_store::{read_manifest, Store};
+use engram_store::{compact_snapshots, read_manifest, Store};
 
 mod provider;
 
@@ -92,6 +92,13 @@ enum Commands {
         #[arg(long)]
         repo: Option<String>,
 
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
+    /// Compact snapshots by promoting through storage tiers
+    Compact {
         /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
         path: PathBuf,
@@ -418,6 +425,25 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("Error: onboarding failed: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        Commands::Compact { path } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            match compact_snapshots(&path) {
+                Ok(report) => {
+                    println!("Compaction complete:");
+                    println!("  Active → Compressed: {}", report.active_to_compressed);
+                    println!("  Compressed → Archived: {}", report.compressed_to_archived);
+                }
+                Err(e) => {
+                    eprintln!("Error: compaction failed: {e}");
                     process::exit(1);
                 }
             }
@@ -1295,5 +1321,43 @@ mod tests {
         assert!(report.architecture_analyzed);
         assert!(report.abstractions_extracted);
         assert_eq!(report.files_written.len(), 4);
+    }
+
+    // --- Compact command tests ---
+
+    #[test]
+    fn test_compact_default_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "compact"]);
+        match cli.command {
+            Commands::Compact { path } => {
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Compact command"),
+        }
+    }
+
+    #[test]
+    fn test_compact_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "compact", "--path", "/tmp/my-store"]);
+        match cli.command {
+            Commands::Compact { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/my-store"));
+            }
+            _ => panic!("expected Compact command"),
+        }
+    }
+
+    #[test]
+    fn test_compact_runs_on_store() {
+        use engram_store::compact_snapshots;
+
+        let (_dir, store_path) = init_store_with_sources(vec![]);
+
+        // No snapshots yet — should return zero counts
+        let report = compact_snapshots(&store_path).unwrap();
+        assert_eq!(report.active_to_compressed, 0);
+        assert_eq!(report.compressed_to_archived, 0);
     }
 }
