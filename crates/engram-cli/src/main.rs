@@ -9,7 +9,7 @@ use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig}
 use engram_ingest::{IngestPipeline, IngestReport};
 use engram_mcp::McpServer;
 use engram_query::IndexManager;
-use engram_store::{compact_snapshots, read_manifest, Store};
+use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
 
 mod provider;
 
@@ -31,6 +31,13 @@ enum DepthArg {
     Quick,
     Standard,
     Deep,
+}
+
+#[derive(Clone, ValueEnum)]
+enum SyncMode {
+    Pull,
+    Push,
+    Both,
 }
 
 impl From<DepthArg> for OnboardingDepth {
@@ -67,10 +74,25 @@ enum Commands {
     /// Initialize a new semantic store
     Init {
         /// Create a local store
-        #[arg(long)]
+        #[arg(long, conflicts_with = "remote")]
         local: bool,
 
+        /// Initialize from a remote git URL
+        #[arg(long, conflicts_with = "local")]
+        remote: Option<String>,
+
         /// Path for the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
+    /// Sync the store with its remote
+    Sync {
+        /// Sync mode: pull, push, or both (default: both)
+        #[arg(long, default_value = "both")]
+        mode: SyncMode,
+
+        /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
         path: PathBuf,
     },
@@ -339,9 +361,13 @@ async fn main() {
                 config.embedding.provider, config.embedding.model
             );
         }
-        Commands::Init { local, path } => {
-            if !local {
-                eprintln!("Error: --local flag is required for init");
+        Commands::Init {
+            local,
+            remote,
+            path,
+        } => {
+            if !local && remote.is_none() {
+                eprintln!("Error: --local or --remote <url> flag is required for init");
                 process::exit(1);
             }
 
@@ -351,13 +377,28 @@ async fn main() {
             }
 
             let config = StoreConfig::default();
-            match Store::init_local(&path, &config) {
-                Ok(_) => {
-                    println!("Initialized engram store at {}", path.display());
+            if let Some(url) = remote {
+                match Store::init_remote(&url, &path, &config) {
+                    Ok(_) => {
+                        println!(
+                            "Initialized engram store at {} (remote: {url})",
+                            path.display()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Error: failed to initialize remote store: {e}");
+                        process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error: failed to initialize store: {e}");
-                    process::exit(1);
+            } else {
+                match Store::init_local(&path, &config) {
+                    Ok(_) => {
+                        println!("Initialized engram store at {}", path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("Error: failed to initialize store: {e}");
+                        process::exit(1);
+                    }
                 }
             }
         }
@@ -509,6 +550,82 @@ async fn main() {
                 }
             }
         }
+        Commands::Sync { mode, path } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            let config = match load_config(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            if config.store.remote.is_none() {
+                eprintln!("Error: no remote configured for this store");
+                eprintln!("Hint: run `engram init --remote <url>` to set up a remote store");
+                process::exit(1);
+            }
+
+            fn print_report(report: &engram_store::SyncReport) {
+                let dir = match report.direction {
+                    engram_store::SyncDirection::Pull => "Pull",
+                    engram_store::SyncDirection::Push => "Push",
+                };
+                println!("  {dir}: {} commits transferred", report.commits_transferred);
+                if !report.conflicts.is_empty() {
+                    println!("  Conflicts resolved: {}", report.conflicts.len());
+                    for c in &report.conflicts {
+                        println!("    - {c}");
+                    }
+                }
+            }
+
+            println!("Syncing store at {}...", path.display());
+
+            match mode {
+                SyncMode::Pull => match sync_pull(&path) {
+                    Ok(report) => {
+                        print_report(&report);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: sync pull failed: {e}");
+                        process::exit(1);
+                    }
+                },
+                SyncMode::Push => match sync_push(&path) {
+                    Ok(report) => {
+                        print_report(&report);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: sync push failed: {e}");
+                        process::exit(1);
+                    }
+                },
+                SyncMode::Both => {
+                    match sync_pull(&path) {
+                        Ok(report) => print_report(&report),
+                        Err(e) => {
+                            eprintln!("Error: sync pull failed: {e}");
+                            process::exit(1);
+                        }
+                    }
+                    match sync_push(&path) {
+                        Ok(report) => print_report(&report),
+                        Err(e) => {
+                            eprintln!("Error: sync push failed: {e}");
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+
+            println!("Sync complete.");
+        }
     }
 }
 
@@ -525,7 +642,7 @@ mod tests {
     use engram_core::Manifest;
     use engram_store::{read_manifest, write_manifest};
 
-    use super::{load_config, run_reindex, Cli, Commands, DepthArg, Transport};
+    use super::{load_config, run_reindex, Cli, Commands, DepthArg, SyncMode, Transport};
 
     // --- Mock embedding provider for tests ---
 
@@ -905,8 +1022,9 @@ mod tests {
 
         let cli = Cli::parse_from(["engram", "init", "--local"]);
         match cli.command {
-            Commands::Init { local, path } => {
+            Commands::Init { local, remote, path } => {
                 assert!(local);
+                assert!(remote.is_none());
                 assert_eq!(path, PathBuf::from("engram-store"));
             }
             _ => panic!("expected Init command"),
@@ -919,8 +1037,9 @@ mod tests {
 
         let cli = Cli::parse_from(["engram", "init", "--local", "--path", "/tmp/my-store"]);
         match cli.command {
-            Commands::Init { local, path } => {
+            Commands::Init { local, remote, path } => {
                 assert!(local);
+                assert!(remote.is_none());
                 assert_eq!(path, PathBuf::from("/tmp/my-store"));
             }
             _ => panic!("expected Init command"),
@@ -1362,5 +1481,119 @@ mod tests {
         let report = compact_snapshots(&store_path).unwrap();
         assert_eq!(report.active_to_compressed, 0);
         assert_eq!(report.compressed_to_archived, 0);
+    }
+
+    // --- Sync command arg parsing tests ---
+
+    #[test]
+    fn test_sync_defaults_to_both() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "sync"]);
+        match cli.command {
+            Commands::Sync { mode, path } => {
+                assert!(matches!(mode, SyncMode::Both));
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_sync_pull_mode() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "sync", "--mode", "pull"]);
+        match cli.command {
+            Commands::Sync { mode, .. } => {
+                assert!(matches!(mode, SyncMode::Pull));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_sync_push_mode() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "sync", "--mode", "push"]);
+        match cli.command {
+            Commands::Sync { mode, .. } => {
+                assert!(matches!(mode, SyncMode::Push));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_sync_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "sync", "--path", "/tmp/my-store"]);
+        match cli.command {
+            Commands::Sync { path, .. } => {
+                assert_eq!(path, PathBuf::from("/tmp/my-store"));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    // --- Init --remote arg parsing tests ---
+
+    #[test]
+    fn test_init_remote_flag() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "init",
+            "--remote",
+            "https://github.com/org/repo.git",
+        ]);
+        match cli.command {
+            Commands::Init {
+                local,
+                remote,
+                path,
+            } => {
+                assert!(!local);
+                assert_eq!(remote, Some("https://github.com/org/repo.git".to_string()));
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_remote_with_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "init",
+            "--remote",
+            "https://github.com/org/repo.git",
+            "--path",
+            "/tmp/store",
+        ]);
+        match cli.command {
+            Commands::Init {
+                local,
+                remote,
+                path,
+            } => {
+                assert!(!local);
+                assert_eq!(remote, Some("https://github.com/org/repo.git".to_string()));
+                assert_eq!(path, PathBuf::from("/tmp/store"));
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_local_and_remote_conflict() {
+        use clap::Parser;
+        let result = Cli::try_parse_from([
+            "engram",
+            "init",
+            "--local",
+            "--remote",
+            "https://github.com/org/repo.git",
+        ]);
+        assert!(result.is_err());
     }
 }
