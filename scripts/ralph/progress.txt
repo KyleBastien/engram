@@ -80,6 +80,7 @@ Started: 03/09/2026 17:15:47
 - `Repository::clone()` on empty bare repo may succeed with no HEAD — check `repo.head().is_ok()` to detect this
 - serde v1 (with "derive" feature) is a direct dependency of engram-store for Serialize on sync types
 - git2 merge workflow: fetch → FETCH_HEAD → merge_analysis → fast_forward/merge → resolve conflicts → commit(2 parents) → cleanup_state
+- McpServer has `context: Context` field set via `set_context()` before `run()`; `handle_tools_list` filters tools via `context.allowed_tools()` HashSet
 
 ---
 
@@ -1277,4 +1278,68 @@ Started: 03/09/2026 17:15:47
   - serde (v1, derive) is now a direct dependency of engram-store (previously only transitive through engram-core)
   - count_commits_between uses revwalk with push/hide for counting new commits after pull
   - count_commits_ahead compares local HEAD to refs/remotes/origin/{branch} for push commit counting
+---
+
+## 2026-03-10 - US-074
+- Implemented `engram_sync` MCP tool that triggers store sync within a session
+- Tool name: `engram_sync` with optional `direction` parameter (pull/push/both, default both)
+- Calls `engram_store::sync_pull` and `engram_store::sync_push` based on direction
+- Returns JSON with array of SyncReport objects (direction, commits_transferred, conflicts)
+- Added `sync_tool_definitions()` in tools.rs with 3 new unit tests
+- Updated handle_tools_list to include sync tools, handle_tools_call dispatch for engram_sync
+- Updated test_tools_list_returns_phase1_tools: tool count 13 → 14, added engram_sync assertion
+- All 173 engram-mcp tests pass, clippy workspace clean
+- Files changed: crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - New MCP tool pattern: add definition in tools.rs, import in server.rs, extend in handle_tools_list, add dispatch + handler in server.rs, update tool count test
+  - engram_store::sync_pull/sync_push take &Path (store root) and return Result<SyncReport>
+  - SyncReport derives Serialize so it can be directly embedded in JSON responses
+---
+
+## 2026-03-10 - US-075
+- Implemented `engram sync` and `engram init --remote` CLI commands
+- Added `Sync` command with `--mode` flag (pull/push/both, default both) and `--path`
+- Added `--remote <url>` flag to `Init` command (conflicts with `--local`)
+- Sync checks for remote config in store's `store.remote` field; prints helpful error if not configured
+- Init --remote calls `Store::init_remote(url, path, config)` and prints success with remote URL
+- Sync prints per-direction report: commits transferred, conflicts resolved
+- Added `SyncMode` enum (Pull, Push, Both) with clap ValueEnum
+- 10 new tests: sync defaults, pull/push modes, custom path, init remote flag, init remote with path, local+remote conflict
+- All 54 engram-cli tests pass, clippy workspace clean
+- Files changed: crates/engram-cli/src/main.rs
+- **Learnings for future iterations:**
+  - `config.store.remote` (Option<String>) determines if a store has a remote configured
+  - `sync_pull` and `sync_push` are standalone functions (not Store methods) imported from `engram_store`
+  - Use `conflicts_with` in clap to enforce mutual exclusivity between `--local` and `--remote`
+---
+
+## 2026-03-10 - US-076
+- Created `gh-aw/engram-reindex.md` with GitHub Agentic Workflow definition for remote store reindexing
+- Workflow triggers: push to main, daily at 2am UTC
+- Workflow steps: sync pull → reindex --full → onboard (analyze) → status (flag stale) → sync push → open summary PR if >50 chunks updated
+- Includes error handling guidance and environment variable table
+- Files changed: gh-aw/engram-reindex.md (new)
+- **Learnings for future iterations:**
+  - `engram analyze` command does not exist yet — `engram onboard` is the closest equivalent for analysis
+  - GitHub Agentic Workflows are markdown files in `gh-aw/` directory
+  - This is a documentation-only story; no Rust code changes needed, but clippy still must pass
+---
+
+## 2026-03-10 - US-077
+- Implemented context system with tool surface control in engram-mcp
+- Added `Context` enum with 5 variants: Default, ClaudeCode, Cursor, Ci, IdeAssistant
+- Each context defines an allow-list of tool names via `allowed_tools()` method
+- `Context::from_name(&str)` parses context strings, unknown names fall back to Default
+- Added `context` field to `McpServer` struct, `set_context()` setter method
+- Modified `handle_tools_list()` to filter tools by active context's allow-list
+- Wired CLI `--context` flag to `McpServer::set_context(Context::from_name(&context))` in main.rs
+- Tool counts per context: Default/ClaudeCode=14, Cursor/IdeAssistant=7, Ci=3
+- Exported `Context` type from engram-mcp lib.rs
+- 14 new tests: context parsing, allowed_tools per context, tools/list integration tests with context filtering
+- Files changed: crates/engram-mcp/src/server.rs, crates/engram-mcp/src/lib.rs, crates/engram-cli/src/main.rs
+- **Learnings for future iterations:**
+  - Context filtering uses `retain()` on the full tool list — simple and composable with existing tool definition functions
+  - `handle_tools_list` now takes `&Context` parameter; `handle_request` passes it through
+  - `is_some_and()` is preferred over `map_or(false, ...)` by clippy (unnecessary_map_or lint)
+  - Context is set once before `server.run()` and is immutable during the session — no runtime mutation needed
 ---

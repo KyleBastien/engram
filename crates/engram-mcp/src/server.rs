@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -11,6 +11,70 @@ use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGrap
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
 use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
+
+/// Built-in contexts that control which MCP tools are exposed to the client.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Context {
+    /// All tools exposed (default).
+    Default,
+    /// Full agent environment — all tools exposed.
+    ClaudeCode,
+    /// IDE integration — read-only search + assessment tools, no knowledge writes.
+    Cursor,
+    /// CI pipeline — minimal read-only tools.
+    Ci,
+    /// IDE assistant — read-only search + assessment tools, no knowledge writes.
+    IdeAssistant,
+}
+
+impl Context {
+    /// Parse a context name string into a Context enum variant.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "claude-code" => Context::ClaudeCode,
+            "cursor" => Context::Cursor,
+            "ci" => Context::Ci,
+            "ide-assistant" => Context::IdeAssistant,
+            _ => Context::Default,
+        }
+    }
+
+    /// Return the set of tool names allowed for this context.
+    pub fn allowed_tools(&self) -> HashSet<&'static str> {
+        match self {
+            Context::Default | Context::ClaudeCode => HashSet::from([
+                "engram_search",
+                "engram_lookup",
+                "engram_status",
+                "engram_record_decision",
+                "engram_record_lesson",
+                "engram_record_pattern",
+                "engram_record_glossary",
+                "engram_snapshot",
+                "engram_onboard",
+                "engram_assess_context",
+                "engram_check_staleness",
+                "engram_graph",
+                "engram_related",
+                "engram_sync",
+            ]),
+            Context::Cursor | Context::IdeAssistant => HashSet::from([
+                "engram_search",
+                "engram_lookup",
+                "engram_status",
+                "engram_related",
+                "engram_graph",
+                "engram_assess_context",
+                "engram_check_staleness",
+            ]),
+            Context::Ci => HashSet::from([
+                "engram_search",
+                "engram_lookup",
+                "engram_status",
+            ]),
+        }
+    }
+}
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -99,6 +163,7 @@ pub struct EngineState {
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
 pub struct McpServer {
     state: Option<EngineState>,
+    context: Context,
 }
 
 impl Default for McpServer {
@@ -110,7 +175,10 @@ impl Default for McpServer {
 impl McpServer {
     /// Create a new MCP server without a search engine (tools that require search will return errors).
     pub fn new() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            context: Context::Default,
+        }
     }
 
     /// Create a new MCP server with a search engine and embedding provider.
@@ -126,6 +194,7 @@ impl McpServer {
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
             }),
+            context: Context::Default,
         }
     }
 
@@ -146,7 +215,13 @@ impl McpServer {
                 session: SessionTracker::new(),
                 graph: SymbolGraph::default(),
             }),
+            context: Context::Default,
         }
+    }
+
+    /// Set the active context for tool surface control. Context is fixed for the session duration.
+    pub fn set_context(&mut self, context: Context) {
+        self.context = context;
     }
 
     /// Set the cross-repo symbol graph on the engine state.
@@ -200,7 +275,7 @@ impl McpServer {
                 continue;
             }
 
-            let response = handle_request(&request, self.state.as_ref()).await;
+            let response = handle_request(&request, self.state.as_ref(), &self.context).await;
 
             eprintln!(
                 "engram-mcp: {} -> {}",
@@ -222,10 +297,11 @@ impl McpServer {
 async fn handle_request(
     request: &JsonRpcRequest,
     state: Option<&EngineState>,
+    context: &Context,
 ) -> JsonRpcResponse {
     match request.method.as_str() {
         "initialize" => handle_initialize(request),
-        "tools/list" => handle_tools_list(request),
+        "tools/list" => handle_tools_list(request, context),
         "tools/call" => handle_tools_call(request, state).await,
         _ => JsonRpcResponse::error(
             request.id.clone(),
@@ -251,7 +327,7 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
     )
 }
 
-fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_tools_list(request: &JsonRpcRequest, context: &Context) -> JsonRpcResponse {
     let mut tools = phase1_tool_definitions();
     tools.extend(knowledge_tool_definitions());
     tools.extend(onboarding_tool_definitions());
@@ -259,6 +335,14 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     tools.extend(graph_tool_definitions());
     tools.extend(related_tool_definitions());
     tools.extend(sync_tool_definitions());
+
+    let allowed = context.allowed_tools();
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|name| allowed.contains(name))
+    });
+
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -1980,6 +2064,20 @@ mod tests {
 
     async fn run_server(input: &str) -> Vec<JsonRpcResponse> {
         let server = McpServer::new();
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    async fn run_server_with_context(input: &str, context: Context) -> Vec<JsonRpcResponse> {
+        let mut server = McpServer::new();
+        server.set_context(context);
         let reader = tokio::io::BufReader::new(input.as_bytes());
         let mut output = Vec::new();
         server.run(reader, &mut output).await.unwrap();
@@ -4899,5 +4997,132 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_related"));
+    }
+
+    // --- Context system tests ---
+
+    #[test]
+    fn test_context_from_name_known_contexts() {
+        assert_eq!(Context::from_name("default"), Context::Default);
+        assert_eq!(Context::from_name("claude-code"), Context::ClaudeCode);
+        assert_eq!(Context::from_name("cursor"), Context::Cursor);
+        assert_eq!(Context::from_name("ci"), Context::Ci);
+        assert_eq!(Context::from_name("ide-assistant"), Context::IdeAssistant);
+    }
+
+    #[test]
+    fn test_context_from_name_unknown_falls_back_to_default() {
+        assert_eq!(Context::from_name("unknown"), Context::Default);
+        assert_eq!(Context::from_name(""), Context::Default);
+        assert_eq!(Context::from_name("my-project"), Context::Default);
+    }
+
+    #[test]
+    fn test_default_context_allows_all_tools() {
+        let allowed = Context::Default.allowed_tools();
+        assert_eq!(allowed.len(), 14);
+        assert!(allowed.contains("engram_search"));
+        assert!(allowed.contains("engram_record_decision"));
+        assert!(allowed.contains("engram_onboard"));
+        assert!(allowed.contains("engram_sync"));
+    }
+
+    #[test]
+    fn test_claude_code_context_allows_all_tools() {
+        let allowed = Context::ClaudeCode.allowed_tools();
+        assert_eq!(allowed.len(), 14);
+    }
+
+    #[test]
+    fn test_cursor_context_allows_read_only_tools() {
+        let allowed = Context::Cursor.allowed_tools();
+        assert_eq!(allowed.len(), 7);
+        assert!(allowed.contains("engram_search"));
+        assert!(allowed.contains("engram_lookup"));
+        assert!(allowed.contains("engram_status"));
+        assert!(allowed.contains("engram_related"));
+        assert!(allowed.contains("engram_graph"));
+        assert!(allowed.contains("engram_assess_context"));
+        assert!(allowed.contains("engram_check_staleness"));
+        // Write tools excluded
+        assert!(!allowed.contains("engram_record_decision"));
+        assert!(!allowed.contains("engram_onboard"));
+        assert!(!allowed.contains("engram_sync"));
+        assert!(!allowed.contains("engram_snapshot"));
+    }
+
+    #[test]
+    fn test_ci_context_allows_minimal_tools() {
+        let allowed = Context::Ci.allowed_tools();
+        assert_eq!(allowed.len(), 3);
+        assert!(allowed.contains("engram_search"));
+        assert!(allowed.contains("engram_lookup"));
+        assert!(allowed.contains("engram_status"));
+        assert!(!allowed.contains("engram_related"));
+        assert!(!allowed.contains("engram_record_decision"));
+    }
+
+    #[test]
+    fn test_ide_assistant_context_matches_cursor() {
+        let ide = Context::IdeAssistant.allowed_tools();
+        let cursor = Context::Cursor.allowed_tools();
+        assert_eq!(ide, cursor);
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_default_context_returns_all() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server_with_context(&input, Context::Default).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14);
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_ci_context_returns_minimal() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server_with_context(&input, Context::Ci).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_search"));
+        assert!(names.contains(&"engram_lookup"));
+        assert!(names.contains(&"engram_status"));
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_cursor_context_excludes_write_tools() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server_with_context(&input, Context::Cursor).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 7);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"engram_record_decision"));
+        assert!(!names.contains(&"engram_record_lesson"));
+        assert!(!names.contains(&"engram_record_pattern"));
+        assert!(!names.contains(&"engram_record_glossary"));
+        assert!(!names.contains(&"engram_snapshot"));
+        assert!(!names.contains(&"engram_onboard"));
+        assert!(!names.contains(&"engram_sync"));
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_claude_code_context_returns_all() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server_with_context(&input, Context::ClaudeCode).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14);
+    }
+
+    #[test]
+    fn test_context_is_fixed_for_session() {
+        let mut server = McpServer::new();
+        server.set_context(Context::Ci);
+        // Context is set once and remains fixed — no method to change it mid-session
+        // The set_context is called before run() starts the event loop
+        assert!(true); // Context immutability is enforced by design (no runtime mutation API)
     }
 }

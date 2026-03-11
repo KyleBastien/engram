@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
-use engram_mcp::McpServer;
+use engram_mcp::{Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
 
@@ -243,6 +243,7 @@ async fn main() {
                 McpServer::with_engine_and_sources(search, Box::new(provider), source_roots);
             server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status);
             server.set_graph(graph);
+            server.set_context(Context::from_name(&context));
 
             eprintln!("engram: serving on stdio (context: {context})");
 
