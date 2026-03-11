@@ -10,7 +10,7 @@ use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson,
 use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
+use crate::tools::{assessment_tool_definitions, config_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions, sync_tool_definitions};
 
 /// Built-in modes that affect search behavior (knowledge sidecar parameters).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -186,6 +186,17 @@ pub enum Context {
 }
 
 impl Context {
+    /// Return the string name of this context.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Context::Default => "default",
+            Context::ClaudeCode => "claude-code",
+            Context::Cursor => "cursor",
+            Context::Ci => "ci",
+            Context::IdeAssistant => "ide-assistant",
+        }
+    }
+
     /// Parse a context name string into a Context enum variant.
     pub fn from_name(name: &str) -> Self {
         match name {
@@ -215,6 +226,8 @@ impl Context {
                 "engram_graph",
                 "engram_related",
                 "engram_sync",
+                "engram_switch_mode",
+                "engram_get_config",
             ]),
             Context::Cursor | Context::IdeAssistant => HashSet::from([
                 "engram_search",
@@ -224,11 +237,15 @@ impl Context {
                 "engram_graph",
                 "engram_assess_context",
                 "engram_check_staleness",
+                "engram_switch_mode",
+                "engram_get_config",
             ]),
             Context::Ci => HashSet::from([
                 "engram_search",
                 "engram_lookup",
                 "engram_status",
+                "engram_switch_mode",
+                "engram_get_config",
             ]),
         }
     }
@@ -471,7 +488,7 @@ async fn handle_request(
     match request.method.as_str() {
         "initialize" => handle_initialize(request),
         "tools/list" => handle_tools_list(request, context),
-        "tools/call" => handle_tools_call(request, state).await,
+        "tools/call" => handle_tools_call(request, state, context).await,
         _ => JsonRpcResponse::error(
             request.id.clone(),
             METHOD_NOT_FOUND,
@@ -504,6 +521,7 @@ fn handle_tools_list(request: &JsonRpcRequest, context: &Context) -> JsonRpcResp
     tools.extend(graph_tool_definitions());
     tools.extend(related_tool_definitions());
     tools.extend(sync_tool_definitions());
+    tools.extend(config_tool_definitions());
 
     let allowed = context.allowed_tools();
     tools.retain(|t| {
@@ -523,6 +541,7 @@ fn handle_tools_list(request: &JsonRpcRequest, context: &Context) -> JsonRpcResp
 async fn handle_tools_call(
     request: &JsonRpcRequest,
     state: Option<&EngineState>,
+    context: &Context,
 ) -> JsonRpcResponse {
     let params = request.params.as_ref();
     let tool_name = params
@@ -545,6 +564,8 @@ async fn handle_tools_call(
         "engram_graph" => handle_engram_graph(request, state).await,
         "engram_related" => handle_engram_related(request, state).await,
         "engram_sync" => handle_engram_sync(request, state).await,
+        "engram_switch_mode" => handle_engram_switch_mode(request, state).await,
+        "engram_get_config" => handle_engram_get_config(request, state, context).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -2162,6 +2183,123 @@ async fn handle_engram_sync(
     )
 }
 
+async fn handle_engram_switch_mode(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let args = request.params.as_ref().and_then(|p| p.get("arguments"));
+
+    let mode_names = match args.and_then(|a| a.get("modes")).and_then(|m| m.as_array()) {
+        Some(arr) => arr,
+        None => return tool_error_response(request, "modes parameter is required (array of mode names)"),
+    };
+
+    let mut modes = Vec::new();
+    for name_val in mode_names {
+        let name = match name_val.as_str() {
+            Some(n) => n,
+            None => return tool_error_response(request, "Each mode must be a string"),
+        };
+        match Mode::from_name(name) {
+            Some(mode) => modes.push(mode),
+            None => {
+                return tool_error_response(
+                    request,
+                    &format!(
+                        "Unknown mode '{}'. Valid modes: explore, edit, plan, onboard, benchmark",
+                        name
+                    ),
+                )
+            }
+        }
+    }
+
+    if modes.is_empty() {
+        return tool_error_response(request, "At least one mode must be specified");
+    }
+
+    state.modes.set_modes(modes);
+
+    let active_modes: Vec<&str> = state.modes.active_modes().iter().map(|m| m.name()).collect();
+    let behavior = state.modes.merged_behavior();
+
+    let response_data = json!({
+        "active_modes": active_modes,
+        "behavior_changes": {
+            "knowledge_top_k": behavior.knowledge_top_k,
+            "min_relevance": behavior.min_relevance,
+            "boost_decisions": behavior.boost_decisions,
+            "boost_patterns": behavior.boost_patterns,
+        }
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
+async fn handle_engram_get_config(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+    context: &Context,
+) -> JsonRpcResponse {
+    let allowed_tools: Vec<&str> = {
+        let mut tools: Vec<&str> = context.allowed_tools().into_iter().collect();
+        tools.sort();
+        tools
+    };
+
+    let (active_modes, search_config, embedding_provider) = match state {
+        Some(s) => {
+            let modes: Vec<&str> = s.modes.active_modes().iter().map(|m| m.name()).collect();
+            let behavior = s.modes.merged_behavior();
+            let search = json!({
+                "knowledge_top_k": behavior.knowledge_top_k,
+                "min_relevance": behavior.min_relevance,
+                "boost_decisions": behavior.boost_decisions,
+                "boost_patterns": behavior.boost_patterns,
+            });
+            let provider = json!({
+                "name": s.provider.name(),
+                "dimensions": s.provider.dimensions(),
+            });
+            (json!(modes), search, provider)
+        }
+        None => (json!([]), json!(null), json!(null)),
+    };
+
+    let response_data = json!({
+        "context": context.name(),
+        "active_modes": active_modes,
+        "available_tools": allowed_tools,
+        "search_config": search_config,
+        "embedding_provider": embedding_provider,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -2528,7 +2666,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -5195,23 +5333,25 @@ mod tests {
     #[test]
     fn test_default_context_allows_all_tools() {
         let allowed = Context::Default.allowed_tools();
-        assert_eq!(allowed.len(), 14);
+        assert_eq!(allowed.len(), 16);
         assert!(allowed.contains("engram_search"));
         assert!(allowed.contains("engram_record_decision"));
         assert!(allowed.contains("engram_onboard"));
         assert!(allowed.contains("engram_sync"));
+        assert!(allowed.contains("engram_switch_mode"));
+        assert!(allowed.contains("engram_get_config"));
     }
 
     #[test]
     fn test_claude_code_context_allows_all_tools() {
         let allowed = Context::ClaudeCode.allowed_tools();
-        assert_eq!(allowed.len(), 14);
+        assert_eq!(allowed.len(), 16);
     }
 
     #[test]
     fn test_cursor_context_allows_read_only_tools() {
         let allowed = Context::Cursor.allowed_tools();
-        assert_eq!(allowed.len(), 7);
+        assert_eq!(allowed.len(), 9);
         assert!(allowed.contains("engram_search"));
         assert!(allowed.contains("engram_lookup"));
         assert!(allowed.contains("engram_status"));
@@ -5219,6 +5359,8 @@ mod tests {
         assert!(allowed.contains("engram_graph"));
         assert!(allowed.contains("engram_assess_context"));
         assert!(allowed.contains("engram_check_staleness"));
+        assert!(allowed.contains("engram_switch_mode"));
+        assert!(allowed.contains("engram_get_config"));
         // Write tools excluded
         assert!(!allowed.contains("engram_record_decision"));
         assert!(!allowed.contains("engram_onboard"));
@@ -5229,10 +5371,12 @@ mod tests {
     #[test]
     fn test_ci_context_allows_minimal_tools() {
         let allowed = Context::Ci.allowed_tools();
-        assert_eq!(allowed.len(), 3);
+        assert_eq!(allowed.len(), 5);
         assert!(allowed.contains("engram_search"));
         assert!(allowed.contains("engram_lookup"));
         assert!(allowed.contains("engram_status"));
+        assert!(allowed.contains("engram_switch_mode"));
+        assert!(allowed.contains("engram_get_config"));
         assert!(!allowed.contains("engram_related"));
         assert!(!allowed.contains("engram_record_decision"));
     }
@@ -5250,7 +5394,7 @@ mod tests {
         let responses = run_server_with_context(&input, Context::Default).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
     }
 
     #[tokio::test]
@@ -5259,11 +5403,13 @@ mod tests {
         let responses = run_server_with_context(&input, Context::Ci).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
         assert!(names.contains(&"engram_status"));
+        assert!(names.contains(&"engram_switch_mode"));
+        assert!(names.contains(&"engram_get_config"));
     }
 
     #[tokio::test]
@@ -5272,7 +5418,7 @@ mod tests {
         let responses = run_server_with_context(&input, Context::Cursor).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"engram_record_decision"));
         assert!(!names.contains(&"engram_record_lesson"));
@@ -5289,7 +5435,7 @@ mod tests {
         let responses = run_server_with_context(&input, Context::ClaudeCode).await;
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
     }
 
     #[test]
@@ -5433,5 +5579,143 @@ mod tests {
         let server = McpServer::with_engine(search, provider);
         // Just verify it constructs without panic — mode tracker is internal
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_requires_modes_param() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("modes parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_validates_mode_names() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {"modes": ["invalid"]}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Unknown mode 'invalid'"));
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_returns_active_modes_and_behavior() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {"modes": ["edit"]}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(data["active_modes"].as_array().unwrap().contains(&json!("edit")));
+        assert!(data["behavior_changes"]["knowledge_top_k"].is_number());
+        assert!(data["behavior_changes"]["min_relevance"].is_number());
+        assert!(data["behavior_changes"]["boost_decisions"].is_number());
+        assert!(data["behavior_changes"]["boost_patterns"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_multiple_modes() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {"modes": ["explore", "plan"]}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        let modes = data["active_modes"].as_array().unwrap();
+        assert_eq!(modes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_empty_modes_rejected() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_switch_mode", "arguments": {"modes": []}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("At least one mode"));
+    }
+
+    #[tokio::test]
+    async fn test_get_config_returns_config_fields() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_get_config", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(data["context"], "default");
+        assert!(data["active_modes"].is_array());
+        assert!(data["available_tools"].is_array());
+        assert!(data["search_config"].is_object());
+        assert!(data["embedding_provider"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_get_config_embedding_provider_info() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_get_config", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(data["embedding_provider"]["name"], "mock/test");
+        assert!(data["embedding_provider"]["dimensions"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_config_without_engine() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_get_config", "arguments": {}})),
+        );
+        let responses = run_server(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(data["context"], "default");
+        assert!(data["active_modes"].as_array().unwrap().is_empty());
+        assert!(data["search_config"].is_null());
+        assert!(data["embedding_provider"].is_null());
+    }
+
+    #[test]
+    fn test_context_name_roundtrip() {
+        assert_eq!(Context::Default.name(), "default");
+        assert_eq!(Context::ClaudeCode.name(), "claude-code");
+        assert_eq!(Context::Cursor.name(), "cursor");
+        assert_eq!(Context::Ci.name(), "ci");
+        assert_eq!(Context::IdeAssistant.name(), "ide-assistant");
     }
 }

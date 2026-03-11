@@ -301,6 +301,38 @@ pub fn sync_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for mode switching and config inspection MCP tools.
+pub fn config_tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "name": "engram_switch_mode",
+            "description": "Switch the active search behavior modes. Modes affect knowledge sidecar parameters (top_k, min_relevance, boost factors). Multiple modes can be active simultaneously and their behaviors are merged using the most permissive values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "modes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["explore", "edit", "plan", "onboard", "benchmark"]
+                        },
+                        "description": "List of mode names to activate. Replaces all currently active modes."
+                    }
+                },
+                "required": ["modes"]
+            }
+        }),
+        json!({
+            "name": "engram_get_config",
+            "description": "Inspect the current server configuration including active context, modes, available tools, search parameters, and embedding provider.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+    ]
+}
+
 /// Returns tool definitions for graph exploration MCP tools.
 pub fn graph_tool_definitions() -> Vec<serde_json::Value> {
     vec![json!({
@@ -634,6 +666,31 @@ mod tests {
     fn test_sync_has_no_required_params() {
         let tools = sync_tool_definitions();
         let tool = &tools[0];
+        assert!(tool["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_config_tool_definitions_count() {
+        let tools = config_tool_definitions();
+        assert_eq!(tools.len(), 2);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_switch_mode"));
+        assert!(names.contains(&"engram_get_config"));
+    }
+
+    #[test]
+    fn test_switch_mode_has_required_modes() {
+        let tools = config_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_switch_mode").unwrap();
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "modes");
+    }
+
+    #[test]
+    fn test_get_config_has_no_required_params() {
+        let tools = config_tool_definitions();
+        let tool = tools.iter().find(|t| t["name"] == "engram_get_config").unwrap();
         assert!(tool["inputSchema"]["required"].is_null());
     }
 
