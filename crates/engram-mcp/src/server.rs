@@ -10,7 +10,7 @@ use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson,
 use engram_query::{ChunkEntry, Direction, HybridSearch, SearchResult, SymbolGraph, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
+use crate::tools::{assessment_tool_definitions, graph_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions, related_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
@@ -257,6 +257,7 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     tools.extend(onboarding_tool_definitions());
     tools.extend(assessment_tool_definitions());
     tools.extend(graph_tool_definitions());
+    tools.extend(related_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -288,6 +289,7 @@ async fn handle_tools_call(
         "engram_assess_context" => handle_engram_assess_context(request, state).await,
         "engram_check_staleness" => handle_engram_check_staleness(request, state).await,
         "engram_graph" => handle_engram_graph(request, state).await,
+        "engram_related" => handle_engram_related(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -1767,6 +1769,69 @@ async fn handle_engram_graph(
     )
 }
 
+async fn handle_engram_related(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Search engine not initialized"),
+    };
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"))
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let chunk_id = args.get("chunk_id").and_then(|c| c.as_str());
+    let symbol = args.get("symbol").and_then(|s| s.as_str());
+
+    if chunk_id.is_none() && symbol.is_none() {
+        return tool_error_response(
+            request,
+            "At least one of chunk_id or symbol is required",
+        );
+    }
+
+    let top_k = args
+        .get("top_k")
+        .and_then(|k| k.as_u64())
+        .unwrap_or(10) as usize;
+
+    let results = match state.search.find_related(chunk_id, symbol, top_k) {
+        Ok(r) => r,
+        Err(e) => return tool_error_response(request, &format!("Related search failed: {e}")),
+    };
+
+    let formatted: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| format_code_result(r, false))
+        .collect();
+
+    let response_data = json!({
+        "results": formatted,
+        "meta": {
+            "result_count": formatted.len(),
+            "chunk_id": chunk_id,
+            "symbol": symbol,
+            "top_k": top_k,
+        }
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -2119,11 +2184,12 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
         assert!(names.contains(&"engram_status"));
+        assert!(names.contains(&"engram_related"));
         assert!(names.contains(&"engram_graph"));
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
@@ -4581,5 +4647,185 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_graph"));
+    }
+
+    // --- engram_related tests ---
+
+    #[tokio::test]
+    async fn test_related_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "chunk_id": "repo#src/math.rs#calculate_total" }
+            })),
+        );
+        let responses = run_server(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert!(result["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_related_missing_both_params_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": {}
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert!(result["isError"].as_bool().unwrap());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("At least one of chunk_id or symbol is required"));
+    }
+
+    #[tokio::test]
+    async fn test_related_by_chunk_id_returns_results() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "chunk_id": "repo#src/math.rs#calculate_total" }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert!(!result["isError"].as_bool().unwrap_or(true));
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        // Should return other chunks, excluding the input chunk itself
+        for r in results {
+            assert_ne!(r["chunk_id"].as_str().unwrap(), "repo#src/math.rs#calculate_total");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_related_by_symbol_returns_results() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "symbol": "calculate_total" }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert!(!result["isError"].as_bool().unwrap_or(true));
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        // Should return related chunks, excluding the symbol's own chunks
+        for r in results {
+            assert_ne!(r["name"].as_str().unwrap(), "calculate_total");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_related_nonexistent_chunk_id_returns_empty() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "chunk_id": "nonexistent#chunk#id" }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_related_nonexistent_symbol_returns_empty() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "symbol": "nonexistent_symbol" }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_related_respects_top_k() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "chunk_id": "repo#src/math.rs#calculate_total", "top_k": 1 }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        assert!(results.len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn test_related_returns_code_result_format() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "chunk_id": "repo#src/math.rs#calculate_total" }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        let results = data["results"].as_array().unwrap();
+        if !results.is_empty() {
+            let r = &results[0];
+            // Verify it has the same format as engram_search code results
+            assert!(r.get("chunk_id").is_some());
+            assert!(r.get("score").is_some());
+            assert!(r.get("kind").is_some());
+            assert!(r.get("name").is_some());
+            assert!(r.get("file").is_some());
+            assert!(r.get("repo").is_some());
+            assert!(r.get("lines").is_some());
+            assert!(r.get("stale").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_related_meta_fields() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_related",
+                "arguments": { "symbol": "render_button", "top_k": 5 }
+            })),
+        );
+        let responses = run_server_with_engine(&input).await;
+        let data = parse_tool_text(&responses[0]);
+        assert!(data.get("meta").is_some());
+        let meta = &data["meta"];
+        assert!(meta.get("result_count").is_some());
+        assert!(meta.get("top_k").is_some());
+        assert_eq!(meta["top_k"].as_u64().unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_related_listed_in_tools() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_related"));
     }
 }

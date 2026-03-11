@@ -101,6 +101,104 @@ impl HybridSearch {
             .collect()
     }
 
+    /// Find chunks semantically related to a given chunk_id or symbol name.
+    ///
+    /// If `chunk_id` is provided, looks up that chunk's embedding and finds nearest neighbors.
+    /// If `symbol` is provided, looks up all chunks with that name, averages their embeddings,
+    /// and finds nearest neighbors. The input chunk(s) are excluded from results.
+    ///
+    /// Returns `SearchResult`s in the same format as `search()`.
+    pub fn find_related(
+        &self,
+        chunk_id: Option<&str>,
+        symbol: Option<&str>,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>> {
+        // Determine which keys to use and which to exclude
+        let (query_vector, exclude_keys): (Vec<f32>, Vec<u64>) = if let Some(cid) = chunk_id {
+            // Find the key for this chunk_id
+            let (key, _entry) = match self
+                .metadata
+                .iter()
+                .find(|(_k, e)| e.chunk_id == cid)
+            {
+                Some(pair) => pair,
+                None => return Ok(Vec::new()),
+            };
+
+            // Retrieve the stored embedding vector
+            match self.hnsw.get_vector(*key) {
+                Some(v) => (v, vec![*key]),
+                None => return Ok(Vec::new()),
+            }
+        } else if let Some(sym) = symbol {
+            // Find all keys for chunks with this symbol name
+            let matching: Vec<(u64, &ChunkEntry)> = self
+                .metadata
+                .iter()
+                .filter(|(_k, e)| e.name == sym)
+                .map(|(k, e)| (*k, e))
+                .collect();
+
+            if matching.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let exclude: Vec<u64> = matching.iter().map(|(k, _)| *k).collect();
+
+            // Collect and average embeddings
+            let dims = self.hnsw.dimensions();
+            let mut sum = vec![0.0f32; dims];
+            let mut count = 0usize;
+
+            for (key, _) in &matching {
+                if let Some(v) = self.hnsw.get_vector(*key) {
+                    for (i, val) in v.iter().enumerate() {
+                        sum[i] += val;
+                    }
+                    count += 1;
+                }
+            }
+
+            if count == 0 {
+                return Ok(Vec::new());
+            }
+
+            let avg: Vec<f32> = sum.iter().map(|s| s / count as f32).collect();
+            (avg, exclude)
+        } else {
+            return Ok(Vec::new());
+        };
+
+        // Search for nearest neighbors, fetching extra to account for exclusions
+        let fetch_k = top_k + exclude_keys.len();
+        let hnsw_results = self.hnsw.search(&query_vector, fetch_k)?;
+
+        // Build results excluding input chunk(s)
+        let results: Vec<SearchResult> = hnsw_results
+            .into_iter()
+            .filter(|(key, _)| !exclude_keys.contains(key))
+            .take(top_k)
+            .filter_map(|(key, distance)| {
+                self.metadata.get(&key).map(|entry| SearchResult {
+                    chunk_id: entry.chunk_id.clone(),
+                    score: 1.0 - distance as f64, // convert distance to similarity
+                    kind: entry.kind.clone(),
+                    name: entry.name.clone(),
+                    signature: entry.signature.clone(),
+                    file: entry.file.clone(),
+                    repo: entry.repo.clone(),
+                    lines: (entry.start_line, entry.end_line),
+                    stale: entry.stale,
+                    tags: entry.tags.clone(),
+                    indexed_at: entry.indexed_at.clone(),
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Search combining vector similarity and keyword relevance.
     ///
     /// `query` is the text query for BM25 keyword search.
@@ -683,5 +781,65 @@ mod tests {
 
         // With None, all partitions searched — should see code + knowledge
         assert!(all_results.len() >= 2, "None should search all partitions");
+    }
+
+    #[test]
+    fn find_related_by_chunk_id_excludes_self() {
+        let search = build_test_search();
+        let results = search
+            .find_related(Some("repo#src/math.rs#calculate_total"), None, 10)
+            .unwrap();
+        // Should not include the input chunk
+        for r in &results {
+            assert_ne!(r.chunk_id, "repo#src/math.rs#calculate_total");
+        }
+        // Should still return some results (the other 2 chunks)
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn find_related_by_symbol_excludes_matching() {
+        let search = build_test_search();
+        let results = search
+            .find_related(None, Some("render_button"), 10)
+            .unwrap();
+        for r in &results {
+            assert_ne!(r.name, "render_button");
+        }
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn find_related_nonexistent_chunk_id_empty() {
+        let search = build_test_search();
+        let results = search
+            .find_related(Some("nonexistent#chunk"), None, 10)
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_nonexistent_symbol_empty() {
+        let search = build_test_search();
+        let results = search
+            .find_related(None, Some("no_such_symbol"), 10)
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_neither_param_empty() {
+        let search = build_test_search();
+        let results = search.find_related(None, None, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_related_respects_top_k() {
+        let search = build_test_search();
+        let results = search
+            .find_related(Some("repo#src/math.rs#calculate_total"), None, 1)
+            .unwrap();
+        assert!(results.len() <= 1);
     }
 }

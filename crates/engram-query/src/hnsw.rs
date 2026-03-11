@@ -125,6 +125,17 @@ impl HnswIndex {
     pub fn dimensions(&self) -> usize {
         self.dimensions
     }
+
+    /// Retrieve the stored vector for a given key.
+    ///
+    /// Returns `None` if the key is not found in the index.
+    pub fn get_vector(&self, key: u64) -> Option<Vec<f32>> {
+        let mut buffer = vec![0.0f32; self.dimensions];
+        match self.index.get(key, &mut buffer) {
+            Ok(count) if count > 0 => Some(buffer),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -75,6 +75,7 @@ Started: 03/09/2026 17:15:47
 - SymbolGraph in engram-query/src/graph.rs: build from exports+imports, traverse(name, Direction, depth), save/load JSON cache
 - Graph cache: `graph.json` in `.engram-cache/`; best-effort write (silent failure), load falls back to rebuild from store
 - Clippy enforces `Entry::Vacant` pattern over `contains_key` + `insert` on HashMap (map_entry lint)
+- usearch Index.get(key, &mut buffer) retrieves stored vectors; HnswIndex.get_vector(key) wraps this for Option<Vec<f32>> access
 
 ---
 
@@ -1211,4 +1212,31 @@ Started: 03/09/2026 17:15:47
   - EngineState fields can be set post-construction via setter methods (set_boot_info, set_graph) for data not available at constructor time
   - SymbolGraph is cloned from IndexManager before `into_hybrid_search()` consumes it
   - Test helpers `run_server_with_engine` use `McpServer::with_engine()` which defaults graph to empty — for graph-specific tests, construct server manually and call `set_graph()`
+---
+
+## 2026-03-10 - US-071
+- Implemented `engram_related` MCP tool for finding semantically related chunks by chunk_id or symbol name
+- Added `get_vector(key) -> Option<Vec<f32>>` to HnswIndex using usearch's native `get()` method for retrieving stored embedding vectors by key
+- Added `find_related(chunk_id, symbol, top_k) -> Result<Vec<SearchResult>>` to HybridSearch:
+  - If chunk_id provided: looks up the chunk's key, retrieves its embedding, searches HNSW for nearest neighbors
+  - If symbol provided: finds all matching chunks, averages their embeddings, searches HNSW for nearest neighbors
+  - Input chunk(s) excluded from results
+  - Returns same SearchResult format as `search()`
+- Added `related_tool_definitions()` in tools.rs with `engram_related` tool (optional: chunk_id, symbol, top_k)
+- Added `handle_engram_related` handler in server.rs:
+  - Validates at least one of chunk_id or symbol is provided
+  - Delegates to `HybridSearch::find_related()`
+  - Returns results in same format as `engram_search` code results (uses `format_code_result`)
+  - Response includes `results` array and `meta` object with result_count, chunk_id, symbol, top_k
+- Updated tool count from 12 to 13 in `test_tools_list_returns_phase1_tools`
+- 6 new hybrid.rs tests: find_related by chunk_id excludes self, by symbol excludes matching, nonexistent chunk_id empty, nonexistent symbol empty, neither param empty, respects top_k
+- 9 new server.rs tests: no engine error, missing both params error, by chunk_id returns results, by symbol returns results, nonexistent chunk_id empty, nonexistent symbol empty, respects top_k, code result format verification, meta fields, listed in tools
+- All 704 workspace tests pass, clippy clean
+- Files changed: crates/engram-query/src/hnsw.rs, crates/engram-query/src/hybrid.rs, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - usearch Index has `get(key, &mut buffer) -> Result<usize>` for retrieving stored vectors by key — count>0 means found
+  - `find_related` uses HNSW-only search (no BM25) since the input is an embedding, not text
+  - Score in find_related is `1.0 - distance` to convert cosine distance to similarity score
+  - When fetching from HNSW for exclusion, fetch `top_k + exclude_keys.len()` to ensure enough results after filtering
+  - `related_tool_definitions()` follows the pattern of separate tool definition functions per category
 ---

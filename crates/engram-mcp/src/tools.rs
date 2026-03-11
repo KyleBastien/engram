@@ -258,6 +258,31 @@ pub fn assessment_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for related chunks MCP tools.
+pub fn related_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_related",
+        "description": "Find chunks semantically related to a given chunk or symbol. Uses embedding similarity to discover related code, docs, or knowledge without requiring a text query.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "string",
+                    "description": "Chunk ID to find related chunks for (looks up chunk embedding and finds nearest neighbors)"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name to find related chunks for (averages embeddings of all matching chunks)"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of related results to return (default: 10)"
+                }
+            }
+        }
+    })]
+}
+
 /// Returns tool definitions for graph exploration MCP tools.
 pub fn graph_tool_definitions() -> Vec<serde_json::Value> {
     vec![json!({
@@ -528,6 +553,31 @@ mod tests {
         let tool = tools.iter().find(|t| t["name"] == "engram_check_staleness").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.is_empty());
+    }
+
+    #[test]
+    fn test_related_tool_definitions_count() {
+        let tools = related_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_related");
+    }
+
+    #[test]
+    fn test_related_has_no_required_params() {
+        let tools = related_tool_definitions();
+        let tool = &tools[0];
+        // No required params — but at least one of chunk_id or symbol must be provided (enforced in handler)
+        assert!(tool["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_related_has_optional_params() {
+        let tools = related_tool_definitions();
+        let tool = &tools[0];
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("chunk_id"));
+        assert!(props.contains_key("symbol"));
+        assert!(props.contains_key("top_k"));
     }
 
     #[test]
