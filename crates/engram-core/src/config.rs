@@ -57,12 +57,15 @@ pub struct SourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoreSection {
     pub path: String,
+    #[serde(default)]
+    pub remote: Option<String>,
 }
 
 impl Default for StoreSection {
     fn default() -> Self {
         Self {
             path: ".engram-store".to_string(),
+            remote: None,
         }
     }
 }

@@ -110,6 +110,85 @@ impl Store {
             repo,
         })
     }
+
+    /// Initialize a remote-backed store.
+    ///
+    /// If the remote repository has commits, clones it to `local_path`.
+    /// If the remote repository is empty, initializes a local store and pushes the initial commit.
+    /// The remote URL is stored in `engram.config.yaml` under `store.remote`.
+    pub fn init_remote(url: &str, local_path: &Path, config: &StoreConfig) -> Result<Store> {
+        // Try to clone — check if the result has actual content (HEAD exists)
+        let clone_result = Repository::clone(url, local_path);
+        let remote_has_content = clone_result
+            .as_ref()
+            .ok()
+            .is_some_and(|repo| repo.head().is_ok());
+
+        if remote_has_content {
+            let repo = clone_result.unwrap();
+            // Clone succeeded with content — update config to include remote URL
+            let mut updated_config = if local_path.join("engram.config.yaml").exists() {
+                let yaml = fs::read_to_string(local_path.join("engram.config.yaml"))
+                    .map_err(|e| EngramError::Config(e.to_string()))?;
+                serde_yaml::from_str::<StoreConfig>(&yaml)
+                    .map_err(|e| EngramError::Config(e.to_string()))?
+            } else {
+                config.clone()
+            };
+            updated_config.store.remote = Some(url.to_string());
+            let yaml = serde_yaml::to_string(&updated_config)
+                .map_err(|e| EngramError::Config(e.to_string()))?;
+            fs::write(local_path.join("engram.config.yaml"), yaml)?;
+
+            // Commit config update if it changed
+            let _ = commit_changes(&repo, "engram: set remote URL in config");
+
+            Ok(Store {
+                path: local_path.to_path_buf(),
+                repo,
+            })
+        } else {
+            // Remote is empty or clone failed — initialize locally and push
+            // Drop the clone result before cleaning up
+            drop(clone_result);
+            let _ = fs::remove_dir_all(local_path);
+
+            let mut remote_config = config.clone();
+            remote_config.store.remote = Some(url.to_string());
+
+            Self::init_local(local_path, &remote_config)?;
+
+            // Add the remote and push
+            let repo = Repository::open(local_path)
+                .map_err(|e| EngramError::Git(e.to_string()))?;
+            repo.remote("origin", url)
+                .map_err(|e| EngramError::Git(e.to_string()))?;
+
+            {
+                // Scope borrows so they're dropped before we move repo
+                let head = repo.head().map_err(|e| EngramError::Git(e.to_string()))?;
+                let branch_ref = head
+                    .name()
+                    .ok_or_else(|| {
+                        EngramError::Git("HEAD is not a valid UTF-8 ref".to_string())
+                    })?
+                    .to_string();
+                let refspec = format!("{branch_ref}:{branch_ref}");
+
+                let mut remote = repo
+                    .find_remote("origin")
+                    .map_err(|e| EngramError::Git(e.to_string()))?;
+                remote
+                    .push(&[&refspec], None)
+                    .map_err(|e| EngramError::Git(e.to_string()))?;
+            }
+
+            Ok(Store {
+                path: local_path.to_path_buf(),
+                repo,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +303,97 @@ mod tests {
         assert_eq!(deserialized.embedding.model, "custom-model");
         assert_eq!(deserialized.embedding.dimensions, 1024);
         assert_eq!(deserialized.search.default_limit, 50);
+    }
+
+    /// Helper: create a bare repo to act as a remote.
+    fn create_bare_remote(tmp: &TempDir) -> PathBuf {
+        let bare_path = tmp.path().join("remote.git");
+        Repository::init_bare(&bare_path).unwrap();
+        bare_path
+    }
+
+    #[test]
+    fn test_init_remote_empty_remote_creates_store_and_pushes() {
+        let tmp = TempDir::new().unwrap();
+        let bare_path = create_bare_remote(&tmp);
+        let local_path = tmp.path().join("local-store");
+        let config = StoreConfig::default();
+
+        let url = bare_path.to_str().unwrap();
+        let store = Store::init_remote(url, &local_path, &config).unwrap();
+        assert_eq!(store.path, local_path);
+
+        // Verify local store has the directory structure
+        assert!(local_path.join(".engram/version").exists());
+        assert!(local_path.join("index").is_dir());
+        assert!(local_path.join("engram.config.yaml").exists());
+
+        // Verify remote URL stored in config
+        let yaml = fs::read_to_string(local_path.join("engram.config.yaml")).unwrap();
+        let deserialized: StoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.store.remote.as_deref(), Some(url));
+
+        // Verify the bare remote now has commits
+        let remote_repo = Repository::open_bare(&bare_path).unwrap();
+        let refs: Vec<_> = remote_repo.references().unwrap().collect();
+        assert!(!refs.is_empty(), "Remote should have refs after push");
+    }
+
+    #[test]
+    fn test_init_remote_existing_remote_clones() {
+        let tmp = TempDir::new().unwrap();
+        let bare_path = create_bare_remote(&tmp);
+        let url = bare_path.to_str().unwrap();
+
+        // First: populate the remote by initializing a store and pushing
+        let first_local = tmp.path().join("first-local");
+        Store::init_remote(url, &first_local, &StoreConfig::default()).unwrap();
+
+        // Second: clone from the now-populated remote
+        let second_local = tmp.path().join("second-local");
+        let store = Store::init_remote(url, &second_local, &StoreConfig::default()).unwrap();
+        assert_eq!(store.path, second_local);
+
+        // Verify cloned store has committed files (git doesn't track empty dirs)
+        assert!(second_local.join(".engram/version").exists());
+        assert!(second_local.join("engram.config.yaml").exists());
+        assert!(second_local.join(".gitignore").exists());
+
+        // Verify remote URL stored in config
+        let yaml = fs::read_to_string(second_local.join("engram.config.yaml")).unwrap();
+        let deserialized: StoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.store.remote.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn test_init_remote_stores_remote_in_config() {
+        let tmp = TempDir::new().unwrap();
+        let bare_path = create_bare_remote(&tmp);
+        let local_path = tmp.path().join("local-store");
+        let config = StoreConfig::default();
+
+        let url = bare_path.to_str().unwrap();
+        Store::init_remote(url, &local_path, &config).unwrap();
+
+        // Read the config and check the remote field
+        let yaml = fs::read_to_string(local_path.join("engram.config.yaml")).unwrap();
+        let deserialized: StoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.store.remote, Some(url.to_string()));
+    }
+
+    #[test]
+    fn test_init_remote_local_has_origin() {
+        let tmp = TempDir::new().unwrap();
+        let bare_path = create_bare_remote(&tmp);
+        let local_path = tmp.path().join("local-store");
+        let config = StoreConfig::default();
+
+        let url = bare_path.to_str().unwrap();
+        Store::init_remote(url, &local_path, &config).unwrap();
+
+        // Verify the local repo has an "origin" remote
+        let repo = Repository::open(&local_path).unwrap();
+        let remote = repo.find_remote("origin").unwrap();
+        assert_eq!(remote.url().unwrap(), url);
     }
 }
