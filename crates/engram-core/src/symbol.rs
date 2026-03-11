@@ -24,6 +24,9 @@ pub struct ExportedSymbol {
     pub is_public: bool,
     /// Optional documentation string for the symbol.
     pub doc: Option<String>,
+    /// The chunk_id linking this export to its indexed chunk.
+    #[serde(default)]
+    pub chunk_id: Option<String>,
 }
 
 /// A resolved import mapping an import path to its source symbol.
@@ -134,6 +137,7 @@ mod tests {
             line: 10,
             is_public: true,
             doc: Some("A foo struct.".into()),
+            chunk_id: None,
         };
         let json = serde_json::to_string(&sym).unwrap();
         let deserialized: ExportedSymbol = serde_json::from_str(&json).unwrap();
@@ -217,6 +221,7 @@ mod tests {
                 line: 1,
                 is_public: true,
                 doc: None,
+                chunk_id: None,
             }])
         }
 
