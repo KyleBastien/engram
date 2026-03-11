@@ -9,15 +9,18 @@ engram-ingest = { path = "../engram-ingest" }
 engram-query = { path = "../engram-query" }
 engram-store = { path = "../engram-store" }
 async-trait = "0.1"
+axum = { version = "0.7", features = ["macros"] }
 chrono = "0.4"
 git2 = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
+tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
 serde_yaml = "0.9"
 tempfile = "3"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }

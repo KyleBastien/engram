@@ -551,6 +551,30 @@ impl McpServer {
 
         Ok(())
     }
+
+    /// Handle a single JSON-RPC request and return the response.
+    /// Used by the SSE transport to process incoming requests.
+    pub async fn handle_json_rpc(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        // Notifications (no id) don't get responses
+        if request.id.is_none() {
+            eprintln!("engram-mcp: notification: {}", request.method);
+            return None;
+        }
+
+        let response = handle_request(request, self.state.as_ref(), &self.context).await;
+
+        eprintln!(
+            "engram-mcp: {} -> {}",
+            request.method,
+            if response.error.is_some() {
+                "error"
+            } else {
+                "ok"
+            }
+        );
+
+        Some(response)
+    }
 }
 
 async fn handle_request(

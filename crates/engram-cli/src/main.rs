@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
-use engram_mcp::{Context, McpServer};
+use engram_mcp::{serve_sse, Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
 
@@ -190,7 +190,7 @@ async fn main() {
     match cli.command {
         Commands::Serve {
             transport,
-            port: _port,
+            port,
             context,
             path,
         } => {
@@ -245,10 +245,9 @@ async fn main() {
             server.set_graph(graph);
             server.set_context(Context::from_name(&context));
 
-            eprintln!("engram: serving on stdio (context: {context})");
-
             match transport {
                 Transport::Stdio => {
+                    eprintln!("engram: serving on stdio (context: {context})");
                     let stdin = tokio::io::stdin();
                     let stdout = tokio::io::stdout();
                     if let Err(e) = server.run(stdin, stdout).await {
@@ -257,8 +256,11 @@ async fn main() {
                     }
                 }
                 Transport::Sse => {
-                    eprintln!("Error: SSE transport is not yet implemented (Phase 1 only supports stdio)");
-                    process::exit(1);
+                    eprintln!("engram: serving on SSE port {port} (context: {context})");
+                    if let Err(e) = serve_sse(server, port).await {
+                        eprintln!("Error: SSE server error: {e}");
+                        process::exit(1);
+                    }
                 }
             }
         }
