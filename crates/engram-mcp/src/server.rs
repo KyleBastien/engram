@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use engram_core::{ChunkKind, Decision, EmbeddingProvider, Lesson, Pattern};
+use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson, Pattern};
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
@@ -201,6 +201,7 @@ async fn handle_tools_call(
         "engram_record_decision" => handle_engram_record_decision(request, state).await,
         "engram_record_lesson" => handle_engram_record_lesson(request, state).await,
         "engram_record_pattern" => handle_engram_record_pattern(request, state).await,
+        "engram_record_glossary" => handle_engram_record_glossary(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -867,6 +868,133 @@ async fn handle_engram_record_pattern(
     )
 }
 
+async fn handle_engram_record_glossary(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    if state.store_path.is_empty() {
+        return tool_error_response(request, "Store path not configured");
+    }
+
+    let args = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("arguments"));
+
+    let term = match args.and_then(|a| a.get("term")).and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => return tool_error_response(request, "term parameter is required"),
+    };
+
+    let definition = match args.and_then(|a| a.get("definition")).and_then(|v| v.as_str()) {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => return tool_error_response(request, "definition parameter is required"),
+    };
+
+    let context = args
+        .and_then(|a| a.get("context"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let store_path = std::path::Path::new(&state.store_path);
+
+    // Check if term already exists to determine action
+    let terms_path = store_path.join("knowledge/glossary/terms.yaml");
+    let action = if terms_path.exists() {
+        let content = match std::fs::read_to_string(&terms_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return tool_error_response(
+                    request,
+                    &format!("Failed to read terms.yaml: {e}"),
+                )
+            }
+        };
+        let existing: Vec<GlossaryEntry> = match serde_yaml::from_str(&content) {
+            Ok(entries) => entries,
+            Err(e) => {
+                return tool_error_response(
+                    request,
+                    &format!("Failed to parse terms.yaml: {e}"),
+                )
+            }
+        };
+        if existing.iter().any(|e| e.term == term) {
+            "updated"
+        } else {
+            "created"
+        }
+    } else {
+        "created"
+    };
+
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let entry = GlossaryEntry {
+        term: term.clone(),
+        definition,
+        context,
+        contributed_by: "mcp-agent".to_string(),
+        created_at,
+    };
+
+    // Write glossary entry (handles create/update logic)
+    match engram_store::write_glossary_entry(store_path, &entry) {
+        Ok(_) => {}
+        Err(e) => {
+            return tool_error_response(
+                request,
+                &format!("Failed to write glossary entry: {e}"),
+            )
+        }
+    };
+
+    // Commit to git
+    let committed = match git2::Repository::open(store_path) {
+        Ok(repo) => {
+            match engram_store::commit_changes(
+                &repo,
+                &format!("knowledge: record glossary term {term}"),
+            ) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return tool_error_response(
+                        request,
+                        &format!("Failed to commit: {e}"),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            return tool_error_response(request, &format!("Failed to open repository: {e}"))
+        }
+    };
+
+    let response_data = json!({
+        "term": term,
+        "action": action,
+        "committed": committed,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 /// Read raw source text from a source repo for the given file path.
 fn read_source_content(state: &EngineState, repo: &str, file: &str) -> Option<String> {
     let root = state.source_roots.get(repo)?;
@@ -1128,7 +1256,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -1136,6 +1264,7 @@ mod tests {
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
         assert!(names.contains(&"engram_record_pattern"));
+        assert!(names.contains(&"engram_record_glossary"));
     }
 
     #[tokio::test]
@@ -1880,6 +2009,7 @@ mod tests {
         std::fs::create_dir_all(store_path.join("knowledge/decisions")).unwrap();
         std::fs::create_dir_all(store_path.join("knowledge/lessons")).unwrap();
         std::fs::create_dir_all(store_path.join("knowledge/patterns")).unwrap();
+        std::fs::create_dir_all(store_path.join("knowledge/glossary")).unwrap();
 
         (search, provider, tmp)
     }
@@ -2585,6 +2715,218 @@ mod tests {
         // Verify all required response fields exist
         assert!(data["id"].is_string());
         assert!(data["path"].is_string());
+        assert!(data["committed"].is_boolean());
+    }
+
+    // --- engram_record_glossary tool tests ---
+
+    #[tokio::test]
+    async fn test_record_glossary_without_engine_returns_error() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "chunk",
+                    "definition": "A semantic unit of code"
+                }
+            })),
+        );
+        let responses = run_server(&input).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_missing_term_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "definition": "A semantic unit of code"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_missing_definition_returns_error() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "chunk"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_creates_new_term() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "chunk",
+                    "definition": "A semantic unit of code"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["term"], "chunk");
+        assert_eq!(data["action"], "created");
+        assert_eq!(data["committed"], true);
+
+        // Verify terms.yaml exists
+        let terms_path = tmp.path().join("knowledge/glossary/terms.yaml");
+        assert!(terms_path.exists());
+
+        // Verify committed to git
+        let repo = git2::Repository::open(tmp.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let msg = head.message().unwrap();
+        assert!(msg.contains("knowledge: record glossary term chunk"));
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_updates_existing_term() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+
+        // Create the term first
+        let input1 = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "chunk",
+                    "definition": "Original definition"
+                }
+            })),
+        );
+        run_server_with_store(&input1, store_path).await;
+
+        // Update the term
+        let input2 = make_request(
+            2,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "chunk",
+                    "definition": "Updated definition"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input2, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["term"], "chunk");
+        assert_eq!(data["action"], "updated");
+        assert_eq!(data["committed"], true);
+
+        // Verify only one entry exists with updated definition
+        let content =
+            std::fs::read_to_string(tmp.path().join("knowledge/glossary/terms.yaml")).unwrap();
+        let entries: Vec<engram_core::GlossaryEntry> = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].definition, "Updated definition");
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_with_optional_context() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "HNSW",
+                    "definition": "Hierarchical Navigable Small World graph",
+                    "context": "Used in engram-query for vector similarity search"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+
+        let content =
+            std::fs::read_to_string(tmp.path().join("knowledge/glossary/terms.yaml")).unwrap();
+        let entries: Vec<engram_core::GlossaryEntry> = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(entries[0].context, "Used in engram-query for vector similarity search");
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_auto_generates_fields() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "BM25",
+                    "definition": "Best Matching 25 scoring function"
+                }
+            })),
+        );
+        run_server_with_store(&input, store_path).await;
+
+        let content =
+            std::fs::read_to_string(tmp.path().join("knowledge/glossary/terms.yaml")).unwrap();
+        let entries: Vec<engram_core::GlossaryEntry> = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(entries[0].contributed_by, "mcp-agent");
+        assert!(!entries[0].created_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_record_glossary_returns_json_format() {
+        let (_search, _provider, tmp) = build_test_engine_with_store();
+        let store_path = tmp.path().to_str().unwrap();
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({
+                "name": "engram_record_glossary",
+                "arguments": {
+                    "term": "embedding",
+                    "definition": "A dense vector representation"
+                }
+            })),
+        );
+        let responses = run_server_with_store(&input, store_path).await;
+        let data = parse_tool_text(&responses[0]);
+
+        // Verify all required response fields exist
+        assert!(data["term"].is_string());
+        assert!(data["action"].is_string());
         assert!(data["committed"].is_boolean());
     }
 }

@@ -155,6 +155,28 @@ pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
             },
             "required": ["name", "description"]
         }
+    }),
+    json!({
+        "name": "engram_record_glossary",
+        "description": "Add or update a glossary term in the knowledge base. If the term already exists in terms.yaml, updates it in place; if new, appends it. Commits to the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "term": {
+                    "type": "string",
+                    "description": "The term to define"
+                },
+                "definition": {
+                    "type": "string",
+                    "description": "The definition of the term"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Additional context about where/how the term is used"
+                }
+            },
+            "required": ["term", "definition"]
+        }
     })]
 }
 
@@ -224,11 +246,12 @@ mod tests {
     #[test]
     fn test_knowledge_tool_definitions_count() {
         let tools = knowledge_tool_definitions();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_record_decision"));
         assert!(names.contains(&"engram_record_lesson"));
         assert!(names.contains(&"engram_record_pattern"));
+        assert!(names.contains(&"engram_record_glossary"));
     }
 
     #[test]
@@ -292,5 +315,24 @@ mod tests {
         let props = pattern_tool["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("examples"));
         assert!(props.contains_key("anti_patterns"));
+    }
+
+    #[test]
+    fn test_record_glossary_has_required_params() {
+        let tools = knowledge_tool_definitions();
+        let glossary_tool = &tools[3];
+        let required = glossary_tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"term"));
+        assert!(required_names.contains(&"definition"));
+        assert_eq!(required_names.len(), 2);
+    }
+
+    #[test]
+    fn test_record_glossary_has_optional_params() {
+        let tools = knowledge_tool_definitions();
+        let glossary_tool = &tools[3];
+        let props = glossary_tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("context"));
     }
 }
