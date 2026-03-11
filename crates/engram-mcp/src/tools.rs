@@ -96,6 +96,37 @@ pub fn knowledge_tool_definitions() -> Vec<serde_json::Value> {
             },
             "required": ["title", "context", "decision"]
         }
+    }),
+    json!({
+        "name": "engram_record_lesson",
+        "description": "Record a lesson learned to the knowledge base. Auto-generates id, contributed_by, and created_at. Writes YAML, embeds it, and commits to the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the lesson"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of what was learned"
+                },
+                "trigger": {
+                    "type": "string",
+                    "description": "What situation or event triggered this lesson"
+                },
+                "resolution": {
+                    "type": "string",
+                    "description": "How the issue was resolved or what to do differently"
+                },
+                "related_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of related file paths"
+                }
+            },
+            "required": ["title", "description", "trigger"]
+        }
     })]
 }
 
@@ -163,10 +194,12 @@ mod tests {
     }
 
     #[test]
-    fn test_knowledge_tool_definitions_has_record_decision() {
+    fn test_knowledge_tool_definitions_count() {
         let tools = knowledge_tool_definitions();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_record_decision");
+        assert_eq!(tools.len(), 2);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_record_decision"));
+        assert!(names.contains(&"engram_record_lesson"));
     }
 
     #[test]
@@ -189,5 +222,26 @@ mod tests {
         assert!(props.contains_key("consequences"));
         assert!(props.contains_key("related_files"));
         assert!(props.contains_key("status"));
+    }
+
+    #[test]
+    fn test_record_lesson_has_required_params() {
+        let tools = knowledge_tool_definitions();
+        let lesson_tool = &tools[1];
+        let required = lesson_tool["inputSchema"]["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|r| r.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"title"));
+        assert!(required_names.contains(&"description"));
+        assert!(required_names.contains(&"trigger"));
+        assert_eq!(required_names.len(), 3);
+    }
+
+    #[test]
+    fn test_record_lesson_has_optional_params() {
+        let tools = knowledge_tool_definitions();
+        let lesson_tool = &tools[1];
+        let props = lesson_tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("resolution"));
+        assert!(props.contains_key("related_files"));
     }
 }
