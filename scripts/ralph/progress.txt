@@ -67,6 +67,11 @@ Started: 03/09/2026 17:15:47
 - New tool category functions (e.g., `assessment_tool_definitions()`) must be imported in server.rs and merged in `handle_tools_list` via `tools.extend()`
 - Manifest.last_indexed_commits is a HashMap<String, String> (source_name → commit SHA); NOT a single Option<String>
 - IngestPipeline::run takes `&[SourceConfig]` (slice of sources), not a single `&SourceConfig`
+- TreeSitterExportExtractor in exports.rs handles TS/Rust/Python export extraction; uses `extract_from_source()` for in-memory and `extract_from_file()` for disk files
+- Export JSONL path: `{store_root}/index/_xrefs/exports.jsonl` — created by `write_exports_jsonl()`, read by `read_exports_jsonl()`
+- chunk_id on ExportedSymbol follows format `{file}#{name}#{kind}` (same `#` separator as pipeline chunk_ids)
+- When adding optional fields to shared types (e.g. ExportedSymbol.chunk_id), use `#[serde(default)]` + `Option<T>` for backward compat
+- Python export extraction: if `__all__` is present, it takes precedence over top-level defs; private names (starting with `_`) are excluded
 
 ---
 
@@ -1110,4 +1115,56 @@ Started: 03/09/2026 17:15:47
   - Per-source incremental indexing looks up `last_indexed_commits.get(&source.name)` instead of a single global commit
   - Tests using `cfg.clone()` require SourceConfig to derive Clone (already did)
   - `[("key".to_string(), "val".to_string())].into_iter().collect()` is a concise way to create a HashMap in test code
+---
+
+## 2026-03-10 - US-066
+- Added `by_repo` HashMap to MetadataIndex for O(1) source repo lookups
+- Added `lookup_by_repo(repo)` method returning `Option<&[ChunkMetadata]>`
+- Refactored `extract_file_path` to `extract_repo_file` returning `(repo, file)` tuple (same pattern as boot.rs)
+- Added `repo` optional parameter to `engram_search` MCP tool definition
+- Added post-search repo filtering in `handle_engram_search` for both code/doc and knowledge results
+- Files changed: crates/engram-query/src/metadata.rs, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs
+- **Learnings for future iterations:**
+  - MetadataIndex now has 5 lookup dimensions: by_id, by_file, by_symbol, by_tag, by_repo
+  - `extract_repo_file` mirrors the same logic as `extract_repo_file` in boot.rs — DRY opportunity exists
+  - Post-search filtering is simpler than modifying the HybridSearch API since SearchResult already has a `repo` field
+  - Adding a tool parameter only requires changes in tools.rs (definition) and server.rs (handler) — clean separation
+---
+
+## 2026-03-10 - US-067
+- Implemented TreeSitterExportExtractor in engram-ingest/src/exports.rs for tree-sitter-based export extraction
+- TypeScript: extracts named exports (functions, classes, types, interfaces, enums, consts), default exports, re-exports (`export { ... } from`, `export *`)
+- Rust: extracts `pub` items (functions, structs, enums, traits, types, consts, statics, modules) and `pub use` re-exports
+- Python: extracts `__all__` items (takes precedence) or top-level definitions (functions, classes, assignments); excludes `_`-prefixed names
+- Added `chunk_id: Option<String>` field to ExportedSymbol in engram-core with `#[serde(default)]` for backward compatibility
+- Added `write_exports_jsonl()` and `read_exports_jsonl()` for `index/_xrefs/exports.jsonl` storage
+- 36 new tests covering all three languages plus JSONL round-trip; all 207 engram-ingest tests pass, 54 engram-core tests pass
+- Files changed: crates/engram-core/src/symbol.rs, crates/engram-ingest/src/exports.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - tree-sitter TypeScript `export_statement` wraps inner declarations; walk children to extract the actual declaration type
+  - Rust `visibility_modifier` child node indicates `pub` — check for it to filter public items
+  - Python `__all__` is an `expression_statement` > `assignment` where left is `__all__` and right is a `list` of `string` nodes
+  - Clippy enforces `['"', '\'']` array syntax over closures for `trim_start_matches`/`trim_end_matches`
+  - Clippy enforces `if` over single-arm `match` blocks (`single_match` lint)
+---
+
+## 2026-03-10 - US-068
+- Implemented TreeSitterImportResolver in engram-ingest/src/imports.rs for tree-sitter-based import extraction and cross-repo resolution
+- TypeScript: parses `import { ... } from '...'`, default imports, namespace imports (`* as`), aliased imports, type imports; skips side-effect imports
+- Rust: parses `use` declarations including simple paths, tree lists (`{A, B}`), glob (`*`), aliases (`as`); handles `crate::`, `super::` paths
+- Python: parses `import X`, `from X import Y`, dotted imports, aliased imports, wildcard imports, relative imports
+- Cross-repo heuristic resolution: matches imported names against ExportedSymbol index by name, scores candidates by publicity, chunk_id presence, and module path hint overlap
+- ResolvedImport includes all required fields: symbol, importing_repo, importing_file, source_repo, source_file, resolved_chunk, resolution: "heuristic"
+- Added `write_imports_jsonl()` and `read_imports_jsonl()` for `index/_xrefs/imports.jsonl` storage
+- Wired imports module into lib.rs with pub re-exports of TreeSitterImportResolver, RawImport, write/read_imports_jsonl
+- Fixed clippy issues: removed unused imports (SymbolId, PathBuf from non-test code), replaced closure char comparison with array syntax
+- All 246 engram-ingest tests pass, clippy workspace clean
+- Files changed: crates/engram-ingest/src/imports.rs (new), crates/engram-ingest/src/lib.rs
+- **Learnings for future iterations:**
+  - imports.rs follows same parser pattern as exports.rs: TreeSitter language setup → root node walk → per-language extraction methods
+  - RawImport is the intermediate representation; resolve_imports() matches raw imports against ExportedSymbol list using HashMap<name, Vec<&ExportedSymbol>>
+  - TypeScript import_statement has "source" field for module path; named_imports contains import_specifier children with name/alias fields
+  - Rust use_declaration text is parsed with a custom `parse_rust_use_path()` function handling simple, tree, glob, and alias forms
+  - Python import_from_statement has "module_name" field; names come after the "import" keyword node
+  - Clippy enforces `['/', '.', ':']` array syntax over `|c: char| c == '/' || ...` closures (manual_pattern_char_comparison lint)
 ---

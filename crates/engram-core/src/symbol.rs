@@ -40,6 +40,21 @@ pub struct ResolvedImport {
     pub importing_file: PathBuf,
     /// The line number of the import statement.
     pub line: usize,
+    /// The repo containing the import statement.
+    #[serde(default)]
+    pub importing_repo: String,
+    /// The repo containing the source symbol.
+    #[serde(default)]
+    pub source_repo: String,
+    /// The file containing the source symbol.
+    #[serde(default)]
+    pub source_file: PathBuf,
+    /// The chunk_id of the resolved source symbol.
+    #[serde(default)]
+    pub resolved_chunk: Option<String>,
+    /// The resolution method used (e.g., "heuristic").
+    #[serde(default)]
+    pub resolution: String,
 }
 
 /// A reference to a symbol at a specific location in the codebase.
@@ -155,10 +170,27 @@ mod tests {
             },
             importing_file: PathBuf::from("src/main.rs"),
             line: 3,
+            importing_repo: "my-repo".into(),
+            source_repo: "other-repo".into(),
+            source_file: PathBuf::from("src/foo.rs"),
+            resolved_chunk: Some("other-repo#src/foo.rs#Bar".into()),
+            resolution: "heuristic".into(),
         };
         let json = serde_json::to_string(&imp).unwrap();
         let deserialized: ResolvedImport = serde_json::from_str(&json).unwrap();
         assert_eq!(imp, deserialized);
+    }
+
+    #[test]
+    fn resolved_import_backward_compat_deserialization() {
+        // Old format without cross-repo fields should deserialize with defaults
+        let json = r#"{"import_path":"use crate::foo","resolved_symbol":{"file":"src/foo.rs","name":"foo","kind":"function"},"importing_file":"src/main.rs","line":1}"#;
+        let imp: ResolvedImport = serde_json::from_str(json).unwrap();
+        assert_eq!(imp.importing_repo, "");
+        assert_eq!(imp.source_repo, "");
+        assert_eq!(imp.source_file, PathBuf::new());
+        assert_eq!(imp.resolved_chunk, None);
+        assert_eq!(imp.resolution, "");
     }
 
     #[test]

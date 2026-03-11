@@ -6,6 +6,7 @@ mod detect;
 mod diff;
 mod exports;
 mod hash;
+mod imports;
 mod markdown;
 mod metadata;
 mod onboarding;
@@ -20,6 +21,9 @@ pub use detect::{detect_language, ChunkerKind};
 pub use diff::{detect_changed_files, ChangedFiles};
 pub use exports::{read_exports_jsonl, write_exports_jsonl, TreeSitterExportExtractor};
 pub use hash::{content_hash, has_chunk_changed};
+pub use imports::{
+    read_imports_jsonl, write_imports_jsonl, RawImport, TreeSitterImportResolver,
+};
 pub use markdown::MarkdownChunker;
 pub use metadata::detect_project_metadata;
 pub use onboarding::run_onboarding;
