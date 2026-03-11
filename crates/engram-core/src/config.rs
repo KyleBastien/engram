@@ -230,7 +230,7 @@ impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            port: 9400,
+            port: 3200,
         }
     }
 }
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(config.search.default_limit, 20);
         assert!((config.search.hybrid_weight - 0.7).abs() < f32::EPSILON);
         assert!(config.dashboard.enabled);
-        assert_eq!(config.dashboard.port, 9400);
+        assert_eq!(config.dashboard.port, 3200);
         assert!(!config.benchmark.enabled);
         assert!(config.storage.compression);
     }

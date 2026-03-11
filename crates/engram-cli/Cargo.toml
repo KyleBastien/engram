@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 engram-core = { path = "../engram-core" }
+engram-dashboard = { path = "../engram-dashboard" }
 engram-store = { path = "../engram-store" }
 engram-ingest = { path = "../engram-ingest" }
 engram-mcp = { path = "../engram-mcp" }
