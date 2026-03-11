@@ -82,6 +82,9 @@ Started: 03/09/2026 17:15:47
 - git2 merge workflow: fetch → FETCH_HEAD → merge_analysis → fast_forward/merge → resolve conflicts → commit(2 parents) → cleanup_state
 - McpServer has `context: Context` field set via `set_context()` before `run()`; `handle_tools_list` filters tools via `context.allowed_tools()` HashSet
 - Mode system: ModeTracker in EngineState tracks active modes; merged_behavior() computes search params; Context=tool surface, Mode=search behavior
+- handle_tools_call takes `(request, state, context)` — new tools needing context info can access it directly
+- When adding tools to allowed_tools(), update 5 test assertions: test_default/ci/cursor/claude_code context tests + test_tools_list_returns_phase1_tools
+- Config/introspection tools (switch_mode, get_config) are available in ALL contexts
 
 ---
 
@@ -1364,4 +1367,20 @@ Started: 03/09/2026 17:15:47
   - Knowledge kind detection uses chunk_id prefix "knowledge#decision" / "knowledge#pattern" (not SearchResult.kind which is always ChunkKind::Knowledge)
   - Mode system is separate from Context system: Context controls tool surface (which tools), Mode controls search behavior (how tools work)
   - ModeTracker.set_modes() replaces all active modes atomically; empty set falls back to Explore behavior
+---
+
+## 2026-03-10 - US-079
+- Implemented `engram_switch_mode` and `engram_get_config` MCP tool handlers
+- Added `config_tool_definitions()` in tools.rs with JSON schemas for both tools
+- Added `Context::name()` method for string representation of context
+- Updated `handle_tools_call` to accept `&Context` parameter (needed for get_config)
+- Added both tools to `allowed_tools()` for all contexts (Default, ClaudeCode, Cursor, IdeAssistant, Ci)
+- Updated all tool count assertions (14→16 for Default/ClaudeCode, 7→9 for Cursor/IdeAssistant, 3→5 for Ci)
+- 12 new tests: tool definitions, switch_mode validation/behavior, get_config fields, context name roundtrip
+- Files changed: crates/engram-mcp/src/server.rs, crates/engram-mcp/src/tools.rs
+- **Learnings for future iterations:**
+  - `handle_tools_call` now takes `&Context` as a third parameter — new tools needing context info can access it directly
+  - Config/introspection tools (switch_mode, get_config) should be available in ALL contexts, not just full-agent contexts
+  - When adding tools to `allowed_tools()`, update 4 separate test assertions: `test_default_context_allows_all_tools`, `test_ci_context_allows_minimal_tools`, `test_cursor_context_allows_read_only_tools`, `test_claude_code_context_allows_all_tools` plus the integration test `test_tools_list_returns_phase1_tools`
+  - `engram_get_config` gracefully handles no-engine state (returns null for search_config and embedding_provider)
 ---
