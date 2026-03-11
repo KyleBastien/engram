@@ -65,6 +65,8 @@ Started: 03/09/2026 17:15:47
 - engram-mcp depends on engram-ingest for onboarding; tool count in `test_tools_list_returns_phase1_tools` must be updated when adding tools (currently 11)
 - EngineState has a `session: SessionTracker` field (Mutex<Vec<SearchEvent>>) for in-memory session tracking; use interior mutability since handlers get `&EngineState`
 - New tool category functions (e.g., `assessment_tool_definitions()`) must be imported in server.rs and merged in `handle_tools_list` via `tools.extend()`
+- Manifest.last_indexed_commits is a HashMap<String, String> (source_name → commit SHA); NOT a single Option<String>
+- IngestPipeline::run takes `&[SourceConfig]` (slice of sources), not a single `&SourceConfig`
 
 ---
 
@@ -1059,4 +1061,53 @@ Started: 03/09/2026 17:15:47
   - Clippy dead-code lint catches unused struct fields even if derived traits use them — only include fields actually read in handler logic
   - RetrievedChunk deliberately omits `repo` and `kind` to avoid clippy dead-code warnings — only store what the handler needs
   - `assessment_tool_definitions()` returns both `engram_assess_context` and `engram_check_staleness` — use find() in tests to locate specific tools
+---
+
+## 2026-03-10 - US-063
+- Implemented `engram onboard` CLI command with `--depth quick|standard|deep`, `--repo <name>`, and `--path` options
+- Added `DepthArg` clap ValueEnum with `From<DepthArg> for OnboardingDepth` conversion
+- Added `Onboard` variant to `Commands` enum, handler calls `engram_ingest::run_onboarding()`
+- Prints progress indicators: [1/4] metadata, [2/4] commands, [3/4] architecture, [4/4] abstractions
+- Prints OnboardingReport summary: depth, metadata, commands, architecture, abstractions, files written, commit hash
+- 9 new tests: default depth, quick/deep depth parsing, repo flag, custom path, all flags, depth conversion, pipeline quick, pipeline standard
+- All 44 engram-cli tests pass, clippy clean
+- Files changed: crates/engram-cli/src/main.rs
+- **Learnings for future iterations:**
+  - Use clap `ValueEnum` for enum args, then provide `From<CliEnum> for CoreEnum` conversion (avoids coupling clap to core types)
+  - Onboard command follows same pattern as Reindex: validate store → load config → resolve source → call pipeline → print report
+  - Source resolution: `--repo` looks up by name, otherwise defaults to first configured source
+  - Progress indicators printed before and after pipeline run (pipeline itself is a single async call, no intermediate callbacks)
+---
+
+## 2026-03-10 - US-064
+- Implemented `engram compact` CLI command that runs snapshot tier promotion
+- Added `Compact` variant to `Commands` enum with `--path` arg (default: engram-store)
+- Match arm validates store exists, calls `compact_snapshots()` from engram-store, prints CompactReport
+- 3 new tests: default path parsing, custom path parsing, compact runs on store (verifies zero counts with empty store)
+- All 47 engram-cli tests pass, clippy clean
+- Files changed: crates/engram-cli/src/main.rs
+- **Learnings for future iterations:**
+  - `compact_snapshots` is already fully implemented in engram-store::snapshot — CLI just needs to call it and format the report
+  - CompactReport has two fields: active_to_compressed and compressed_to_archived
+  - Compact is a sync operation (no async needed) unlike Reindex/Onboard
+---
+
+## 2026-03-10 - US-065
+- Extended ingest pipeline for multi-source-repo support
+- Changed `Manifest.last_indexed_commit: Option<String>` to `last_indexed_commits: HashMap<String, String>` for per-source-repo commit tracking
+- Changed `IngestPipeline::run` signature from `source: &SourceConfig` to `sources: &[SourceConfig]`, processing each source independently in a single pipeline invocation
+- Manifest `source_repos` field now lists source names (not paths), `last_indexed_commits` maps source name → commit SHA
+- Single manifest write and git commit at the end covers all sources
+- Updated CLI `run_reindex` to pass all sources to `IngestPipeline::run` directly instead of looping
+- Updated CLI status display for per-repo commit and staleness tracking
+- Updated all test manifests across engram-core, engram-store, engram-query, engram-cli
+- Added 2 new multi-source tests: `multi_source_repos_indexed_independently` and `multi_source_incremental_tracks_commits_independently`
+- All 582 workspace tests pass, clippy clean
+- Files changed: crates/engram-core/src/manifest.rs, crates/engram-ingest/src/pipeline.rs, crates/engram-cli/src/main.rs, crates/engram-store/src/manifest.rs, crates/engram-query/src/boot.rs
+- **Learnings for future iterations:**
+  - `#[serde(default)]` on `last_indexed_commits` field ensures backwards compatibility with old manifest JSON that doesn't have the field
+  - When changing `IngestPipeline::run` signature, the CLI's `run_reindex` simplifies since the pipeline handles the loop internally
+  - Per-source incremental indexing looks up `last_indexed_commits.get(&source.name)` instead of a single global commit
+  - Tests using `cfg.clone()` require SourceConfig to derive Clone (already did)
+  - `[("key".to_string(), "val".to_string())].into_iter().collect()` is a concise way to create a HashMap in test code
 ---

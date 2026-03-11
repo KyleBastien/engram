@@ -37,14 +37,16 @@ mod tests {
     use tempfile::TempDir;
 
     fn sample_manifest() -> Manifest {
+        let mut last_indexed_commits = std::collections::HashMap::new();
+        last_indexed_commits.insert("project-a".to_string(), "abc123def456".to_string());
         Manifest {
             chunk_count: 42,
-            last_indexed_commit: Some("abc123def456".to_string()),
+            last_indexed_commits,
             model_name: "nomic-embed-text".to_string(),
             dimensions: 768,
             source_repos: vec![
-                "/home/user/project-a".to_string(),
-                "/home/user/project-b".to_string(),
+                "project-a".to_string(),
+                "project-b".to_string(),
             ],
             created_at: "2026-03-09T00:00:00Z".to_string(),
             updated_at: "2026-03-09T12:00:00Z".to_string(),
@@ -62,7 +64,7 @@ mod tests {
         let read_back = read_manifest(store_root).unwrap().expect("should exist");
 
         assert_eq!(manifest.chunk_count, read_back.chunk_count);
-        assert_eq!(manifest.last_indexed_commit, read_back.last_indexed_commit);
+        assert_eq!(manifest.last_indexed_commits, read_back.last_indexed_commits);
         assert_eq!(manifest.model_name, read_back.model_name);
         assert_eq!(manifest.dimensions, read_back.dimensions);
         assert_eq!(manifest.source_repos, read_back.source_repos);

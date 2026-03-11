@@ -138,31 +138,27 @@ fn load_config(store_path: &Path) -> Result<StoreConfig, String> {
 async fn run_reindex(
     store_path: &Path,
     provider: &dyn EmbeddingProvider,
-    sources: Vec<SourceConfig>,
+    mut sources: Vec<SourceConfig>,
     full: bool,
     paths_filter: Option<&str>,
 ) -> engram_core::Result<IngestReport> {
-    let mut total = IngestReport::default();
-    for mut source in sources {
-        if let Some(glob) = paths_filter {
+    if let Some(glob) = paths_filter {
+        for source in &mut sources {
             source.include = vec![glob.to_string()];
         }
-        println!("Reindexing source '{}'...", source.name);
-        let report = IngestPipeline::run(&source, store_path, provider, full).await?;
-        println!(
-            "  {} files processed, {} chunks created, {} skipped, {} deleted",
-            report.files_processed,
-            report.chunks_created,
-            report.chunks_skipped,
-            report.chunks_deleted,
-        );
-        total.files_processed += report.files_processed;
-        total.chunks_created += report.chunks_created;
-        total.chunks_skipped += report.chunks_skipped;
-        total.chunks_deleted += report.chunks_deleted;
-        total.embed_calls += report.embed_calls;
     }
-    Ok(total)
+    for source in &sources {
+        println!("Reindexing source '{}'...", source.name);
+    }
+    let report = IngestPipeline::run(&sources, store_path, provider, full).await?;
+    println!(
+        "  {} files processed, {} chunks created, {} skipped, {} deleted",
+        report.files_processed,
+        report.chunks_created,
+        report.chunks_skipped,
+        report.chunks_deleted,
+    );
+    Ok(report)
 }
 
 #[tokio::main]
@@ -282,11 +278,15 @@ async fn main() {
                 }
             }
 
-            // Last indexed commit
-            println!("\nLast Indexed Commit:");
-            match manifest.as_ref().and_then(|m| m.last_indexed_commit.as_deref()) {
-                Some(commit) => println!("  {commit}"),
-                None => println!("  (not yet indexed)"),
+            // Last indexed commits (per source repo)
+            println!("\nLast Indexed Commits:");
+            match manifest.as_ref() {
+                Some(m) if !m.last_indexed_commits.is_empty() => {
+                    for (repo, commit) in &m.last_indexed_commits {
+                        println!("  {repo}: {commit}");
+                    }
+                }
+                _ => println!("  (not yet indexed)"),
             }
 
             // Staleness summary
@@ -294,10 +294,11 @@ async fn main() {
             if config.sources.is_empty() {
                 println!("  (no sources to check)");
             } else {
-                let indexed_commit = manifest
-                    .as_ref()
-                    .and_then(|m| m.last_indexed_commit.as_deref());
                 for source in &config.sources {
+                    let indexed_commit = manifest
+                        .as_ref()
+                        .and_then(|m| m.last_indexed_commits.get(&source.name))
+                        .map(|s| s.as_str());
                     let source_path = Path::new(&source.path);
                     let status = if indexed_commit.is_none() {
                         "not indexed".to_string()
@@ -1093,7 +1094,7 @@ mod tests {
         let (_dir, store_path) = init_store_with_sources(vec![]);
         let manifest = Manifest {
             chunk_count: 42,
-            last_indexed_commit: Some("abc123".to_string()),
+            last_indexed_commits: [("my-repo".to_string(), "abc123".to_string())].into_iter().collect(),
             model_name: "nomic-embed-text".to_string(),
             dimensions: 768,
             source_repos: vec!["my-repo".to_string()],
@@ -1104,7 +1105,7 @@ mod tests {
 
         let read = read_manifest(&store_path).unwrap().unwrap();
         assert_eq!(read.chunk_count, 42);
-        assert_eq!(read.last_indexed_commit, Some("abc123".to_string()));
+        assert_eq!(read.last_indexed_commits.get("my-repo").map(|s| s.as_str()), Some("abc123"));
     }
 
     #[test]
@@ -1154,10 +1155,10 @@ mod tests {
         let (_dir, store_path) = init_store_with_sources(sources);
         let manifest = Manifest {
             chunk_count: 1,
-            last_indexed_commit: Some(head_oid.clone()),
+            last_indexed_commits: [("test-repo".to_string(), head_oid.clone())].into_iter().collect(),
             model_name: "test".to_string(),
             dimensions: 768,
-            source_repos: vec![src_path.to_string_lossy().to_string()],
+            source_repos: vec!["test-repo".to_string()],
             created_at: "2026-03-09T00:00:00Z".to_string(),
             updated_at: "2026-03-09T12:00:00Z".to_string(),
         };
@@ -1165,7 +1166,7 @@ mod tests {
 
         // Verify: indexed commit matches HEAD — should be "up to date"
         let read = read_manifest(&store_path).unwrap().unwrap();
-        assert_eq!(read.last_indexed_commit.as_deref(), Some(head_oid.as_str()));
+        assert_eq!(read.last_indexed_commits.get("test-repo").map(|s| s.as_str()), Some(head_oid.as_str()));
     }
 
     // --- Onboard command tests ---

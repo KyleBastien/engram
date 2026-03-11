@@ -29,174 +29,204 @@ pub struct IngestReport {
 
 /// The full ingest pipeline orchestrator.
 ///
-/// Indexes a source repository into the git-backed semantic store:
+/// Indexes source repositories into the git-backed semantic store:
 /// detect changes, chunk files, embed new chunks, write to store, commit.
 pub struct IngestPipeline;
 
 impl IngestPipeline {
-    /// Run the full ingest pipeline for a source repo into a store.
+    /// Run the full ingest pipeline for a list of source repos into a store.
+    ///
+    /// Each source repo is processed independently with its own include/exclude
+    /// patterns and incremental commit tracking. Chunks are stored under
+    /// `index/{source_name}/` for each source. A single manifest and git commit
+    /// cover all sources.
     pub async fn run(
-        source: &SourceConfig,
+        sources: &[SourceConfig],
         store_root: &Path,
         provider: &dyn EmbeddingProvider,
         full: bool,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
-        let source_path = Path::new(&source.path);
         let dimensions = provider.dimensions();
         let max_batch = provider.max_batch_size();
+        let now = timestamp();
 
         // Read existing manifest for incremental mode
         let existing_manifest = read_manifest(store_root)?;
-        let since_commit = if full {
-            None
-        } else {
-            existing_manifest
-                .as_ref()
-                .and_then(|m| m.last_indexed_commit.as_deref())
-        };
 
-        // Detect changed files in source repo
-        let changed = detect_changed_files(source_path, since_commit, source)?;
+        // Track per-source commits for the new manifest
+        let mut last_indexed_commits: HashMap<String, String> = existing_manifest
+            .as_ref()
+            .map(|m| m.last_indexed_commits.clone())
+            .unwrap_or_default();
+        let mut source_repo_names: Vec<String> = Vec::new();
 
-        let source_commit = head_oid(source_path)?;
-        let now = timestamp();
+        for source in sources {
+            let source_path = Path::new(&source.path);
+            source_repo_names.push(source.name.clone());
 
-        // Process added + modified files
-        for rel_path in changed.added.iter().chain(changed.modified.iter()) {
-            let kind = detect_language(rel_path);
-            if matches!(kind, ChunkerKind::Skip) {
-                continue;
-            }
-
-            let abs_path = source_path.join(rel_path);
-            let source_text = match fs::read_to_string(&abs_path) {
-                Ok(s) => s,
-                Err(_) => continue,
+            // Per-source incremental commit
+            let since_commit = if full {
+                None
+            } else {
+                existing_manifest
+                    .as_ref()
+                    .and_then(|m| m.last_indexed_commits.get(&source.name))
+                    .map(|s| s.as_str())
             };
 
-            let raw_chunks = chunk_source(&source_text, rel_path, kind);
-            if raw_chunks.is_empty() {
-                continue;
-            }
+            // Detect changed files in source repo
+            let changed = detect_changed_files(source_path, since_commit, source)?;
+            let source_commit = head_oid(source_path)?;
 
-            report.files_processed += 1;
-
-            // Load existing data for change detection
-            let old_chunks = load_old_chunks(store_root, &source.name, rel_path);
-            let old_vectors = load_old_vectors(store_root, &source.name, rel_path);
-
-            let old_map: HashMap<&str, (&str, usize)> = old_chunks
-                .iter()
-                .map(|c| {
-                    (
-                        c.name.as_str(),
-                        (c.content_hash.as_str(), c.embedding_offset as usize),
-                    )
-                })
-                .collect();
-
-            // Pre-compute content hashes
-            let hashes: Vec<String> =
-                raw_chunks.iter().map(|c| content_hash(&c.content)).collect();
-
-            // Classify chunks: reuse old embedding or need new embedding
-            let mut reuse: HashMap<usize, usize> = HashMap::new();
-            let mut to_embed: Vec<usize> = Vec::new();
-
-            for (i, chunk) in raw_chunks.iter().enumerate() {
-                if let Some(&(old_hash, old_offset)) = old_map.get(chunk.name.as_str()) {
-                    if !has_chunk_changed(old_hash, &hashes[i]) {
-                        reuse.insert(i, old_offset);
-                        report.chunks_skipped += 1;
-                        continue;
-                    }
+            // Process added + modified files
+            for rel_path in changed.added.iter().chain(changed.modified.iter()) {
+                let kind = detect_language(rel_path);
+                if matches!(kind, ChunkerKind::Skip) {
+                    continue;
                 }
-                to_embed.push(i);
-                report.chunks_created += 1;
-            }
 
-            // Batch embed new/modified chunks
-            let texts: Vec<&str> = to_embed
-                .iter()
-                .map(|&i| raw_chunks[i].content.as_str())
-                .collect();
-            let mut new_vectors: Vec<Vec<f32>> = Vec::new();
-            for start in (0..texts.len()).step_by(max_batch) {
-                let end = (start + max_batch).min(texts.len());
-                let batch = &texts[start..end];
-                if !batch.is_empty() {
-                    let vecs = provider
-                        .embed(batch)
-                        .await
-                        .map_err(|e| EngramError::Embed(e.to_string()))?;
-                    new_vectors.extend(vecs);
-                    report.embed_calls += 1;
-                }
-            }
-
-            // Assemble final vectors and metadata
-            let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(raw_chunks.len());
-            let mut metadata: Vec<ChunkMetadata> = Vec::with_capacity(raw_chunks.len());
-            let mut embed_idx = 0;
-
-            for (i, chunk) in raw_chunks.iter().enumerate() {
-                let vec = if let Some(&old_offset) = reuse.get(&i) {
-                    extract_vector(&old_vectors, old_offset, dimensions)
-                } else {
-                    let v = new_vectors[embed_idx].clone();
-                    embed_idx += 1;
-                    v
+                let abs_path = source_path.join(rel_path);
+                let source_text = match fs::read_to_string(&abs_path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
                 };
-                vectors.push(vec);
 
-                metadata.push(ChunkMetadata {
-                    chunk_id: format!("{}#{}#{}", source.name, rel_path.display(), chunk.name),
-                    kind: chunk.kind.clone(),
-                    name: chunk.name.clone(),
-                    signature: chunk.signature.clone(),
-                    start_line: chunk.start_line,
-                    end_line: chunk.end_line,
-                    content_hash: hashes[i].clone(),
-                    tags: vec![],
-                    indexed_at: now.clone(),
-                    source_commit: source_commit.clone(),
-                    embedding_offset: i as u64,
-                });
-            }
+                let raw_chunks = chunk_source(&source_text, rel_path, kind);
+                if raw_chunks.is_empty() {
+                    continue;
+                }
 
-            // Write to store
-            let cp = chunks_path(store_root, &source.name, rel_path)?;
-            write_chunks_jsonl(&cp, &metadata)?;
+                report.files_processed += 1;
 
-            let ep = embeddings_path(store_root, &source.name, rel_path)?;
-            write_embeddings_bin(&ep, &vectors, dimensions)?;
-        }
+                // Load existing data for change detection
+                let old_chunks = load_old_chunks(store_root, &source.name, rel_path);
+                let old_vectors = load_old_vectors(store_root, &source.name, rel_path);
 
-        // Handle deleted files
-        for rel_path in &changed.deleted {
-            if let Ok(cp) = chunks_path(store_root, &source.name, rel_path) {
-                if cp.exists() {
-                    if let Ok(old) = read_chunks_jsonl(&cp) {
-                        report.chunks_deleted += old.len();
+                let old_map: HashMap<&str, (&str, usize)> = old_chunks
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.name.as_str(),
+                            (c.content_hash.as_str(), c.embedding_offset as usize),
+                        )
+                    })
+                    .collect();
+
+                // Pre-compute content hashes
+                let hashes: Vec<String> =
+                    raw_chunks.iter().map(|c| content_hash(&c.content)).collect();
+
+                // Classify chunks: reuse old embedding or need new embedding
+                let mut reuse: HashMap<usize, usize> = HashMap::new();
+                let mut to_embed: Vec<usize> = Vec::new();
+
+                for (i, chunk) in raw_chunks.iter().enumerate() {
+                    if let Some(&(old_hash, old_offset)) = old_map.get(chunk.name.as_str()) {
+                        if !has_chunk_changed(old_hash, &hashes[i]) {
+                            reuse.insert(i, old_offset);
+                            report.chunks_skipped += 1;
+                            continue;
+                        }
                     }
-                    let _ = fs::remove_file(&cp);
+                    to_embed.push(i);
+                    report.chunks_created += 1;
+                }
+
+                // Batch embed new/modified chunks
+                let texts: Vec<&str> = to_embed
+                    .iter()
+                    .map(|&i| raw_chunks[i].content.as_str())
+                    .collect();
+                let mut new_vectors: Vec<Vec<f32>> = Vec::new();
+                for start in (0..texts.len()).step_by(max_batch) {
+                    let end = (start + max_batch).min(texts.len());
+                    let batch = &texts[start..end];
+                    if !batch.is_empty() {
+                        let vecs = provider
+                            .embed(batch)
+                            .await
+                            .map_err(|e| EngramError::Embed(e.to_string()))?;
+                        new_vectors.extend(vecs);
+                        report.embed_calls += 1;
+                    }
+                }
+
+                // Assemble final vectors and metadata
+                let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(raw_chunks.len());
+                let mut metadata: Vec<ChunkMetadata> = Vec::with_capacity(raw_chunks.len());
+                let mut embed_idx = 0;
+
+                for (i, chunk) in raw_chunks.iter().enumerate() {
+                    let vec = if let Some(&old_offset) = reuse.get(&i) {
+                        extract_vector(&old_vectors, old_offset, dimensions)
+                    } else {
+                        let v = new_vectors[embed_idx].clone();
+                        embed_idx += 1;
+                        v
+                    };
+                    vectors.push(vec);
+
+                    metadata.push(ChunkMetadata {
+                        chunk_id: format!(
+                            "{}#{}#{}",
+                            source.name,
+                            rel_path.display(),
+                            chunk.name
+                        ),
+                        kind: chunk.kind.clone(),
+                        name: chunk.name.clone(),
+                        signature: chunk.signature.clone(),
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        content_hash: hashes[i].clone(),
+                        tags: vec![],
+                        indexed_at: now.clone(),
+                        source_commit: source_commit.clone(),
+                        embedding_offset: i as u64,
+                    });
+                }
+
+                // Write to store
+                let cp = chunks_path(store_root, &source.name, rel_path)?;
+                write_chunks_jsonl(&cp, &metadata)?;
+
+                let ep = embeddings_path(store_root, &source.name, rel_path)?;
+                write_embeddings_bin(&ep, &vectors, dimensions)?;
+            }
+
+            // Handle deleted files
+            for rel_path in &changed.deleted {
+                if let Ok(cp) = chunks_path(store_root, &source.name, rel_path) {
+                    if cp.exists() {
+                        if let Ok(old) = read_chunks_jsonl(&cp) {
+                            report.chunks_deleted += old.len();
+                        }
+                        let _ = fs::remove_file(&cp);
+                    }
+                }
+                if let Ok(ep) = embeddings_path(store_root, &source.name, rel_path) {
+                    if ep.exists() {
+                        let _ = fs::remove_file(&ep);
+                    }
                 }
             }
-            if let Ok(ep) = embeddings_path(store_root, &source.name, rel_path) {
-                if ep.exists() {
-                    let _ = fs::remove_file(&ep);
-                }
-            }
+
+            // Record per-source commit
+            last_indexed_commits.insert(source.name.clone(), source_commit);
         }
+
+        // Deduplicate source_repo_names while preserving order
+        let mut seen = std::collections::HashSet::new();
+        source_repo_names.retain(|n| seen.insert(n.clone()));
 
         // Update manifest
         let manifest = Manifest {
             chunk_count: report.chunks_created + report.chunks_skipped,
-            last_indexed_commit: Some(source_commit),
+            last_indexed_commits,
             model_name: provider.name().to_string(),
             dimensions,
-            source_repos: vec![source.path.clone()],
+            source_repos: source_repo_names,
             created_at: existing_manifest
                 .as_ref()
                 .map(|m| m.created_at.clone())
@@ -390,7 +420,7 @@ mod tests {
         let provider = MockProvider { dims: 4 };
         let cfg = source_config("test-repo", &src_path);
 
-        let report = IngestPipeline::run(&cfg, &store_path, &provider, true)
+        let report = IngestPipeline::run(&[cfg], &store_path, &provider, true)
             .await
             .unwrap();
 
@@ -403,7 +433,7 @@ mod tests {
         // Verify manifest
         let manifest = read_manifest(&store_path).unwrap().expect("manifest");
         assert_eq!(manifest.chunk_count, report.chunks_created);
-        assert!(manifest.last_indexed_commit.is_some());
+        assert!(manifest.last_indexed_commits.contains_key("test-repo"));
         assert_eq!(manifest.model_name, "mock/test");
         assert_eq!(manifest.dimensions, 4);
     }
@@ -415,7 +445,7 @@ mod tests {
         let provider = MockProvider { dims: 4 };
         let cfg = source_config("repo", &src_path);
 
-        IngestPipeline::run(&cfg, &store_path, &provider, true)
+        IngestPipeline::run(&[cfg], &store_path, &provider, true)
             .await
             .unwrap();
 
@@ -440,7 +470,7 @@ mod tests {
         let cfg = source_config("repo", &src_path);
 
         // Full ingest
-        let r1 = IngestPipeline::run(&cfg, &store_path, &provider, true)
+        let r1 = IngestPipeline::run(&[cfg.clone()], &store_path, &provider, true)
             .await
             .unwrap();
         assert_eq!(r1.chunks_created, 2); // hello + world
@@ -455,7 +485,7 @@ mod tests {
         commit_source(&src_path, "modify world");
 
         // Incremental ingest
-        let r2 = IngestPipeline::run(&cfg, &store_path, &provider, false)
+        let r2 = IngestPipeline::run(&[cfg], &store_path, &provider, false)
             .await
             .unwrap();
         assert_eq!(r2.files_processed, 1);
@@ -474,7 +504,7 @@ mod tests {
         let cfg = source_config("repo", &src_path);
 
         // Full ingest both files
-        let r1 = IngestPipeline::run(&cfg, &store_path, &provider, true)
+        let r1 = IngestPipeline::run(&[cfg.clone()], &store_path, &provider, true)
             .await
             .unwrap();
         assert_eq!(r1.files_processed, 2);
@@ -497,7 +527,7 @@ mod tests {
         }
 
         // Incremental ingest
-        let r2 = IngestPipeline::run(&cfg, &store_path, &provider, false)
+        let r2 = IngestPipeline::run(&[cfg], &store_path, &provider, false)
             .await
             .unwrap();
         assert!(r2.chunks_deleted > 0);
@@ -513,7 +543,7 @@ mod tests {
         let provider = MockProvider { dims: 4 };
         let cfg = source_config("repo", &src_path);
 
-        let report = IngestPipeline::run(&cfg, &store_path, &provider, true)
+        let report = IngestPipeline::run(&[cfg], &store_path, &provider, true)
             .await
             .unwrap();
 
@@ -528,12 +558,12 @@ mod tests {
         let provider = MockProvider { dims: 4 };
         let cfg = source_config("my-project", &src_path);
 
-        IngestPipeline::run(&cfg, &store_path, &provider, true)
+        IngestPipeline::run(&[cfg], &store_path, &provider, true)
             .await
             .unwrap();
 
         let manifest = read_manifest(&store_path).unwrap().unwrap();
-        assert_eq!(manifest.source_repos, vec![src_path.to_string_lossy().to_string()]);
+        assert_eq!(manifest.source_repos, vec!["my-project".to_string()]);
     }
 
     #[tokio::test]
@@ -543,7 +573,7 @@ mod tests {
         let provider = MockProvider { dims: 4 };
         let cfg = source_config("repo", &src_path);
 
-        IngestPipeline::run(&cfg, &store_path, &provider, true)
+        IngestPipeline::run(&[cfg], &store_path, &provider, true)
             .await
             .unwrap();
 
@@ -563,5 +593,89 @@ mod tests {
         let emb = read_embeddings_bin(&ep).unwrap();
         assert_eq!(emb.dimensions, 4);
         assert_eq!(emb.count, chunks.len());
+    }
+
+    #[tokio::test]
+    async fn multi_source_repos_indexed_independently() {
+        // Source repo A: Rust file
+        let (_src_a, src_a_path) = setup_source(&[("lib.rs", "fn alpha() { 1 }")]);
+        // Source repo B: Rust file
+        let (_src_b, src_b_path) = setup_source(&[("main.rs", "fn beta() { 2 }")]);
+
+        let (_store, store_path) = init_store();
+        let provider = MockProvider { dims: 4 };
+
+        let cfg_a = source_config("repo-a", &src_a_path);
+        let cfg_b = source_config("repo-b", &src_b_path);
+
+        let report = IngestPipeline::run(&[cfg_a, cfg_b], &store_path, &provider, true)
+            .await
+            .unwrap();
+
+        // Both files processed
+        assert_eq!(report.files_processed, 2);
+        assert_eq!(report.chunks_created, 2);
+
+        // Verify manifest lists both source repos
+        let manifest = read_manifest(&store_path).unwrap().unwrap();
+        assert_eq!(manifest.source_repos.len(), 2);
+        assert!(manifest.source_repos.contains(&"repo-a".to_string()));
+        assert!(manifest.source_repos.contains(&"repo-b".to_string()));
+
+        // Per-repo commits tracked independently
+        assert!(manifest.last_indexed_commits.contains_key("repo-a"));
+        assert!(manifest.last_indexed_commits.contains_key("repo-b"));
+        assert_ne!(
+            manifest.last_indexed_commits["repo-a"],
+            manifest.last_indexed_commits["repo-b"]
+        );
+
+        // Chunks stored under separate source directories
+        let cp_a = chunks_path(&store_path, "repo-a", Path::new("lib.rs")).unwrap();
+        assert!(cp_a.exists(), "repo-a chunks should exist");
+        let cp_b = chunks_path(&store_path, "repo-b", Path::new("main.rs")).unwrap();
+        assert!(cp_b.exists(), "repo-b chunks should exist");
+
+        // Chunk IDs reference the correct source
+        let chunks_a = read_chunks_jsonl(&cp_a).unwrap();
+        assert!(chunks_a[0].chunk_id.starts_with("repo-a#"));
+        let chunks_b = read_chunks_jsonl(&cp_b).unwrap();
+        assert!(chunks_b[0].chunk_id.starts_with("repo-b#"));
+    }
+
+    #[tokio::test]
+    async fn multi_source_incremental_tracks_commits_independently() {
+        let (_src_a, src_a_path) = setup_source(&[("lib.rs", "fn alpha() { 1 }")]);
+        let (_src_b, src_b_path) = setup_source(&[("main.rs", "fn beta() { 2 }")]);
+
+        let (_store, store_path) = init_store();
+        let provider = MockProvider { dims: 4 };
+
+        let cfg_a = source_config("repo-a", &src_a_path);
+        let cfg_b = source_config("repo-b", &src_b_path);
+
+        // Full ingest both
+        IngestPipeline::run(&[cfg_a.clone(), cfg_b.clone()], &store_path, &provider, true)
+            .await
+            .unwrap();
+
+        // Modify only repo-a
+        fs::write(src_a_path.join("lib.rs"), "fn alpha_v2() { 42 }").unwrap();
+        commit_source(&src_a_path, "update alpha");
+
+        // Incremental ingest both — only repo-a should have changes
+        let report = IngestPipeline::run(&[cfg_a, cfg_b], &store_path, &provider, false)
+            .await
+            .unwrap();
+
+        // Only repo-a's file was processed
+        assert_eq!(report.files_processed, 1);
+        assert_eq!(report.chunks_created, 1); // alpha_v2 is new
+
+        // Manifest still has both repos
+        let manifest = read_manifest(&store_path).unwrap().unwrap();
+        assert_eq!(manifest.source_repos.len(), 2);
+        assert!(manifest.last_indexed_commits.contains_key("repo-a"));
+        assert!(manifest.last_indexed_commits.contains_key("repo-b"));
     }
 }

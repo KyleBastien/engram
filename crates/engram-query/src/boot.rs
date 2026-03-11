@@ -549,7 +549,7 @@ mod tests {
 
         let manifest = Manifest {
             chunk_count: 2,
-            last_indexed_commit: Some("deadbeef".to_string()),
+            last_indexed_commits: [("repo".to_string(), "deadbeef".to_string())].into_iter().collect(),
             model_name: "test-model".to_string(),
             dimensions: dims,
             source_repos: vec!["repo".to_string()],
@@ -629,7 +629,7 @@ mod tests {
 
         let manifest = Manifest {
             chunk_count: 0,
-            last_indexed_commit: None,
+            last_indexed_commits: std::collections::HashMap::new(),
             model_name: "test-model".to_string(),
             dimensions: 32,
             source_repos: vec![],
@@ -677,7 +677,7 @@ mod tests {
 
         let manifest = Manifest {
             chunk_count: 3,
-            last_indexed_commit: Some("abc".to_string()),
+            last_indexed_commits: [("repo".to_string(), "abc".to_string())].into_iter().collect(),
             model_name: "test".to_string(),
             dimensions: dims,
             source_repos: vec!["repo".to_string()],

@@ -464,6 +464,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "engram-core",
+ "engram-ingest",
  "engram-query",
  "engram-store",
  "git2",
