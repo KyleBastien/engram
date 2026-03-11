@@ -1446,3 +1446,22 @@ Started: 03/09/2026 17:15:47
   - Use `#[serde(rename_all = "snake_case")]` on enums for consistent JSON serialization
   - Use `#[serde(default)]` on optional fields so partial JSON deserialization works
 ---
+
+## 2026-03-10 - US-083
+- Created new crate `engram-bench` with BenchmarkHarness struct implementing session lifecycle
+- BenchmarkHarness uses `Mutex<HashMap<String, ActiveSession>>` for thread-safe concurrent sessions
+- `start()` creates session with UUID session_id and returns it
+- `log_event()` appends BenchmarkEvent to in-memory event log for a session
+- `end()` removes session, computes metrics, writes JSONL report to `metrics/runs/{timestamp}_{session_id}.jsonl`
+- `compute_metrics()` computes token_efficiency (sum), retrieval_precision (hit rate), file_read_count, search_to_read_ratio
+- JSONL report format: session line, event lines, report line (one JSON object per line)
+- 9 unit tests: unique IDs, event logging, end lifecycle, file writing, concurrent sessions, empty metrics, precision calc, panic on unknown session
+- Files changed: Cargo.toml, crates/engram-bench/Cargo.toml, crates/engram-bench/project.json, crates/engram-bench/src/lib.rs
+- **Learnings for future iterations:**
+  - New crate creation: Cargo.toml + project.json + src/lib.rs, add to workspace members in root Cargo.toml
+  - Use `Mutex<HashMap>` for concurrent session tracking with interior mutability
+  - Test-only helpers (like `read_report_file`) must be in `#[cfg(test)] mod tests` to avoid dead_code lint
+  - `std::path::Path` must be explicitly imported in test modules when moved out of main scope
+  - uuid v1 with "v4" feature for session ID generation (no "serde" feature needed if not serializing UUIDs)
+  - Custom ISO 8601 timestamp without chrono dependency using Howard Hinnant's date algorithm
+---
