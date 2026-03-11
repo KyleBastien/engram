@@ -7,7 +7,10 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
 use engram_ingest::{IngestPipeline, IngestReport};
-use engram_dashboard::{serve_dashboard, EventBroadcaster};
+use engram_dashboard::{
+    serve_dashboard, CacheStatus, DashboardState, EventBroadcaster, HealthSnapshot,
+    ProviderStatus, RepoHealth, StaleFile,
+};
 use engram_mcp::{serve_sse, Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
@@ -240,6 +243,77 @@ async fn main() {
 
             let graph = index_manager.graph().clone();
             let search = index_manager.into_hybrid_search();
+
+            // Build health snapshot from search stats before handing search to MCP server
+            let health_snapshot = {
+                let repo_stats = search.repo_stats();
+                let stale_file_data = search.stale_files();
+                let manifest = read_manifest(&path).ok().flatten();
+
+                let repos: Vec<RepoHealth> = repo_stats
+                    .into_iter()
+                    .map(|(name, chunk_count, stale_chunks)| {
+                        let (last_commit, last_time) = manifest
+                            .as_ref()
+                            .map(|m| {
+                                let commit = m
+                                    .last_indexed_commits
+                                    .get(&name)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let time = m.updated_at.clone();
+                                (commit, time)
+                            })
+                            .unwrap_or_default();
+                        RepoHealth {
+                            name,
+                            chunk_count,
+                            stale_chunks,
+                            last_indexed_commit: last_commit,
+                            last_reindex_time: last_time,
+                        }
+                    })
+                    .collect();
+
+                let stale_files: Vec<StaleFile> = stale_file_data
+                    .into_iter()
+                    .map(|(file, repo, stale, total, oldest)| StaleFile {
+                        file,
+                        repo,
+                        stale_chunks: stale,
+                        total_chunks: total,
+                        oldest_indexed_at: oldest,
+                    })
+                    .collect();
+
+                let cache_size = fs::read_dir(path.join(".engram-cache"))
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| e.metadata().ok())
+                            .map(|m| m.len())
+                            .sum::<u64>()
+                    })
+                    .unwrap_or(0);
+
+                HealthSnapshot {
+                    total_chunks: search.chunk_count(),
+                    repos,
+                    stale_files,
+                    provider: ProviderStatus {
+                        name: provider.name().to_string(),
+                        model: config.embedding.model.clone(),
+                        reachable: true,
+                    },
+                    cache: CacheStatus {
+                        status: cache_status.clone(),
+                        size_bytes: cache_size,
+                    },
+                    boot_time_ms: boot_ms as u64,
+                    store_path: path.to_string_lossy().to_string(),
+                }
+            };
+
             let mut server =
                 McpServer::with_engine_and_sources(search, Box::new(provider), source_roots);
             server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status);
@@ -249,9 +323,12 @@ async fn main() {
             // Start dashboard server if enabled and not in CI context
             if config.dashboard.enabled && context != "ci" {
                 let dashboard_config = config.dashboard.clone();
-                let broadcaster = EventBroadcaster::default();
+                let state = DashboardState::new(
+                    EventBroadcaster::default(),
+                    health_snapshot,
+                );
                 tokio::spawn(async move {
-                    if let Err(e) = serve_dashboard(&dashboard_config, broadcaster).await {
+                    if let Err(e) = serve_dashboard(&dashboard_config, state).await {
                         eprintln!("Warning: dashboard server error: {e}");
                     }
                 });

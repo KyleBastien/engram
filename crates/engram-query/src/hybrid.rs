@@ -78,6 +78,31 @@ impl HybridSearch {
         stats
     }
 
+    /// Returns files with stale chunks: (file, repo, stale_count, total_count, oldest_indexed_at).
+    /// Sorted by stale_count descending (most stale files first).
+    pub fn stale_files(&self) -> Vec<(String, String, usize, usize, String)> {
+        let mut file_stats: HashMap<(String, String), (usize, usize, String)> = HashMap::new();
+        for entry in self.metadata.values() {
+            let key = (entry.file.clone(), entry.repo.clone());
+            let (stale, total, oldest) =
+                file_stats.entry(key).or_insert((0, 0, String::new()));
+            *total += 1;
+            if entry.stale {
+                *stale += 1;
+            }
+            if oldest.is_empty() || entry.indexed_at < *oldest {
+                oldest.clone_from(&entry.indexed_at);
+            }
+        }
+        let mut result: Vec<(String, String, usize, usize, String)> = file_stats
+            .into_iter()
+            .filter(|(_, (stale, _, _))| *stale > 0)
+            .map(|((file, repo), (stale, total, oldest))| (file, repo, stale, total, oldest))
+            .collect();
+        result.sort_by(|a, b| b.2.cmp(&a.2));
+        result
+    }
+
     /// Look up a single chunk by its chunk_id.
     pub fn lookup_by_chunk_id(&self, chunk_id: &str) -> Option<&ChunkEntry> {
         self.metadata

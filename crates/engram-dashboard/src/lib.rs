@@ -3,12 +3,12 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use rust_embed::Embed;
-use serde::Serialize;
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, RwLock};
 
 use engram_core::DashboardConfig;
 
@@ -74,16 +74,80 @@ impl Default for EventBroadcaster {
     }
 }
 
+/// Per-source-repo index statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoHealth {
+    pub name: String,
+    pub chunk_count: usize,
+    pub stale_chunks: usize,
+    pub last_indexed_commit: String,
+    pub last_reindex_time: String,
+}
+
+/// A file with stale chunks.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StaleFile {
+    pub file: String,
+    pub repo: String,
+    pub stale_chunks: usize,
+    pub total_chunks: usize,
+    pub oldest_indexed_at: String,
+}
+
+/// Embedding provider status.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderStatus {
+    pub name: String,
+    pub model: String,
+    pub reachable: bool,
+}
+
+/// Cache status information.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CacheStatus {
+    pub status: String,
+    pub size_bytes: u64,
+}
+
+/// Snapshot of index health data served via REST API.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HealthSnapshot {
+    pub total_chunks: usize,
+    pub repos: Vec<RepoHealth>,
+    pub stale_files: Vec<StaleFile>,
+    pub provider: ProviderStatus,
+    pub cache: CacheStatus,
+    pub boot_time_ms: u64,
+    pub store_path: String,
+}
+
+/// Shared state for the dashboard: event broadcaster + health data.
+#[derive(Clone)]
+pub struct DashboardState {
+    pub broadcaster: EventBroadcaster,
+    pub health: Arc<RwLock<HealthSnapshot>>,
+}
+
+impl DashboardState {
+    pub fn new(broadcaster: EventBroadcaster, health: HealthSnapshot) -> Self {
+        Self {
+            broadcaster,
+            health: Arc::new(RwLock::new(health)),
+        }
+    }
+}
+
 /// Serve the dashboard HTTP server on the configured port.
 ///
 /// Serves static HTML/JS/CSS files bundled into the binary via rust-embed.
 /// The dashboard is accessible at `http://localhost:{port}/dashboard`.
 /// WebSocket endpoint is at `ws://localhost:{port}/ws`.
+/// REST API endpoints are at `/api/health`.
 pub async fn serve_dashboard(
     config: &DashboardConfig,
-    broadcaster: EventBroadcaster,
+    state: DashboardState,
 ) -> engram_core::Result<()> {
-    let app = build_router_with_events(broadcaster);
+    let app = build_router_with_state(state);
     let addr = format!("0.0.0.0:{}", config.port);
 
     eprintln!(
@@ -113,26 +177,40 @@ pub fn build_router() -> Router {
     Router::new().nest("/dashboard", dashboard_routes)
 }
 
-/// Build the axum Router with WebSocket event broadcasting.
+/// Build the axum Router with WebSocket event broadcasting (legacy).
 pub fn build_router_with_events(broadcaster: EventBroadcaster) -> Router {
-    let shared = Arc::new(broadcaster);
+    let state = DashboardState::new(broadcaster, HealthSnapshot::default());
+    build_router_with_state(state)
+}
 
-    let dashboard_routes = Router::<Arc<EventBroadcaster>>::new()
+/// Build the axum Router with full dashboard state (events + health data).
+pub fn build_router_with_state(state: DashboardState) -> Router {
+    let shared = Arc::new(state);
+
+    let dashboard_routes = Router::<Arc<DashboardState>>::new()
         .route("/", get(index_handler))
         .fallback(get(static_handler));
 
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/health", get(health_handler))
         .nest("/dashboard", dashboard_routes)
         .with_state(shared)
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(broadcaster): State<Arc<EventBroadcaster>>,
+    State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
-    let rx = broadcaster.subscribe();
+    let rx = state.broadcaster.subscribe();
     ws.on_upgrade(|socket| handle_ws_connection(socket, rx))
+}
+
+async fn health_handler(
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let snapshot = state.health.read().await;
+    Json(snapshot.clone())
 }
 
 async fn handle_ws_connection(
@@ -437,5 +515,86 @@ mod tests {
         let broadcaster = EventBroadcaster::default();
         let router = build_router_with_events(broadcaster);
         let _ = router;
+    }
+
+    async fn start_state_test_server(
+        state: DashboardState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = build_router_with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_health_api_returns_json() {
+        let health = HealthSnapshot {
+            total_chunks: 150,
+            repos: vec![RepoHealth {
+                name: "my-repo".to_string(),
+                chunk_count: 150,
+                stale_chunks: 10,
+                last_indexed_commit: "abc123".to_string(),
+                last_reindex_time: "2026-03-10T00:00:00Z".to_string(),
+            }],
+            stale_files: vec![StaleFile {
+                file: "src/main.rs".to_string(),
+                repo: "my-repo".to_string(),
+                stale_chunks: 3,
+                total_chunks: 5,
+                oldest_indexed_at: "2026-03-09T00:00:00Z".to_string(),
+            }],
+            provider: ProviderStatus {
+                name: "ollama".to_string(),
+                model: "nomic-embed-text".to_string(),
+                reachable: true,
+            },
+            cache: CacheStatus {
+                status: "hit".to_string(),
+                size_bytes: 1024,
+            },
+            boot_time_ms: 42,
+            store_path: "/tmp/store".to_string(),
+        };
+        let state = DashboardState::new(EventBroadcaster::default(), health);
+        let (base, handle) = start_state_test_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/api/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["total_chunks"], 150);
+        assert_eq!(body["repos"][0]["name"], "my-repo");
+        assert_eq!(body["repos"][0]["stale_chunks"], 10);
+        assert_eq!(body["stale_files"][0]["file"], "src/main.rs");
+        assert_eq!(body["provider"]["name"], "ollama");
+        assert_eq!(body["cache"]["status"], "hit");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_health_snapshot_default_empty() {
+        let snapshot = HealthSnapshot::default();
+        assert_eq!(snapshot.total_chunks, 0);
+        assert!(snapshot.repos.is_empty());
+        assert!(snapshot.stale_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_state_new() {
+        let broadcaster = EventBroadcaster::default();
+        let state = DashboardState::new(broadcaster, HealthSnapshot::default());
+        let health = state.health.read().await;
+        assert_eq!(health.total_chunks, 0);
     }
 }
