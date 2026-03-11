@@ -229,6 +229,23 @@ pub fn onboarding_tool_definitions() -> Vec<serde_json::Value> {
     })]
 }
 
+/// Returns tool definitions for context assessment MCP tools.
+pub fn assessment_tool_definitions() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "engram_assess_context",
+        "description": "Self-evaluate whether enough context has been gathered for the current task. Returns a summary of searches performed, tokens consumed, knowledge items surfaced, and a structured evaluation prompt. Does NOT perform any search — it is a reflection tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_description": {
+                    "type": "string",
+                    "description": "Description of the task being worked on, used to frame the evaluation question"
+                }
+            }
+        }
+    })]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +449,28 @@ mod tests {
         let props = onboard["inputSchema"]["properties"].as_object().unwrap();
         assert!(props.contains_key("repo"));
         assert!(props.contains_key("depth"));
+    }
+
+    #[test]
+    fn test_assessment_tool_definitions_count() {
+        let tools = assessment_tool_definitions();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"].as_str().unwrap(), "engram_assess_context");
+    }
+
+    #[test]
+    fn test_assess_context_has_no_required_params() {
+        let tools = assessment_tool_definitions();
+        let tool = &tools[0];
+        assert!(tool["inputSchema"]["required"].is_null());
+    }
+
+    #[test]
+    fn test_assess_context_has_optional_task_description() {
+        let tools = assessment_tool_definitions();
+        let tool = &tools[0];
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("task_description"));
+        assert_eq!(props["task_description"]["type"].as_str().unwrap(), "string");
     }
 }

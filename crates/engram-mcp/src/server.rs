@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use serde_json::json;
@@ -9,11 +10,49 @@ use engram_core::{ChunkKind, Decision, EmbeddingProvider, GlossaryEntry, Lesson,
 use engram_query::{ChunkEntry, HybridSearch, SearchResult, DEFAULT_ALPHA};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
-use crate::tools::{knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
+use crate::tools::{assessment_tool_definitions, knowledge_tool_definitions, onboarding_tool_definitions, phase1_tool_definitions};
 
 const SERVER_NAME: &str = "engram";
 const SERVER_VERSION: &str = "0.1.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Records a single search event for session tracking.
+#[derive(Debug, Clone)]
+struct SearchEvent {
+    query: String,
+    scope: String,
+    code_result_count: usize,
+    knowledge_result_count: usize,
+    search_time_ms: u64,
+    timestamp: String,
+}
+
+/// Thread-safe session tracker for accumulating search history.
+#[derive(Debug, Default)]
+struct SessionTracker {
+    events: Mutex<Vec<SearchEvent>>,
+}
+
+impl SessionTracker {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, event: SearchEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<SearchEvent> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+}
 
 /// Holds the search engine and embedding provider needed for tool execution.
 pub struct EngineState {
@@ -27,6 +66,8 @@ pub struct EngineState {
     pub store_path: String,
     /// Whether cache was used during boot ("hit", "miss", or "none").
     pub cache_status: String,
+    /// In-memory session tracker for search history (used by engram_assess_context).
+    session: SessionTracker,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -56,6 +97,7 @@ impl McpServer {
                 boot_time_ms: 0,
                 store_path: String::new(),
                 cache_status: "none".to_string(),
+                session: SessionTracker::new(),
             }),
         }
     }
@@ -74,6 +116,7 @@ impl McpServer {
                 boot_time_ms: 0,
                 store_path: String::new(),
                 cache_status: "none".to_string(),
+                session: SessionTracker::new(),
             }),
         }
     }
@@ -177,6 +220,7 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     let mut tools = phase1_tool_definitions();
     tools.extend(knowledge_tool_definitions());
     tools.extend(onboarding_tool_definitions());
+    tools.extend(assessment_tool_definitions());
     JsonRpcResponse::success(
         request.id.clone(),
         json!({
@@ -205,6 +249,7 @@ async fn handle_tools_call(
         "engram_record_glossary" => handle_engram_record_glossary(request, state).await,
         "engram_snapshot" => handle_engram_snapshot(request, state).await,
         "engram_onboard" => handle_engram_onboard(request, state).await,
+        "engram_assess_context" => handle_engram_assess_context(request, state).await,
         _ => JsonRpcResponse::success(
             request.id.clone(),
             json!({
@@ -332,6 +377,16 @@ async fn handle_engram_search(
 
     let code_count = code_doc_results.iter().filter(|r| is_code_kind(&r.kind)).count();
     let search_time_ms = start.elapsed().as_millis() as u64;
+
+    // Record search event for session tracking
+    state.session.record(SearchEvent {
+        query: query.to_string(),
+        scope: scope.to_string(),
+        code_result_count: code_doc_results.len(),
+        knowledge_result_count: knowledge_results.len(),
+        search_time_ms,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
 
     // Format code/doc results
     let formatted_code: Vec<serde_json::Value> = code_doc_results
@@ -1279,6 +1334,106 @@ async fn handle_engram_onboard(
     }
 }
 
+async fn handle_engram_assess_context(
+    request: &JsonRpcRequest,
+    state: Option<&EngineState>,
+) -> JsonRpcResponse {
+    let state = match state {
+        Some(s) => s,
+        None => return tool_error_response(request, "Engine not initialized"),
+    };
+
+    let args = request.params.as_ref().and_then(|p| p.get("arguments"));
+    let task_description = args
+        .and_then(|a| a.get("task_description"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    let events = state.session.snapshot();
+    let search_count = events.len();
+
+    // Collect unique queries
+    let mut unique_queries: Vec<String> = Vec::new();
+    for e in &events {
+        if !unique_queries.contains(&e.query) {
+            unique_queries.push(e.query.clone());
+        }
+    }
+
+    // Aggregate by scope
+    let mut scope_counts: HashMap<String, usize> = HashMap::new();
+    for e in &events {
+        *scope_counts.entry(e.scope.clone()).or_insert(0) += 1;
+    }
+
+    // Total results and timing
+    let total_code_results: usize = events.iter().map(|e| e.code_result_count).sum();
+    let total_knowledge_results: usize = events.iter().map(|e| e.knowledge_result_count).sum();
+    let total_search_time_ms: u64 = events.iter().map(|e| e.search_time_ms).sum();
+
+    // Build queries list for response
+    let queries_list: Vec<serde_json::Value> = events
+        .iter()
+        .map(|e| {
+            json!({
+                "query": e.query,
+                "scope": e.scope,
+                "code_results": e.code_result_count,
+                "knowledge_results": e.knowledge_result_count,
+                "timestamp": e.timestamp,
+            })
+        })
+        .collect();
+
+    // Build the structured evaluation prompt
+    let task_line = if task_description.is_empty() {
+        String::new()
+    } else {
+        format!("\nTask: {task_description}\n")
+    };
+
+    let evaluation_prompt = format!(
+        "## Context Assessment{task_line}\n\
+         You have performed {search_count} search(es) with {unique_count} unique query/queries.\n\
+         - Code/doc results retrieved: {total_code_results}\n\
+         - Knowledge items surfaced: {total_knowledge_results}\n\
+         - Total search time: {total_search_time_ms}ms\n\n\
+         ### Evaluation\n\
+         Consider the following before proceeding:\n\
+         1. Have you searched for all relevant concepts, files, and symbols related to the task?\n\
+         2. Did the knowledge results provide sufficient architectural context and past decisions?\n\
+         3. Are there any gaps — areas you suspect are relevant but haven't queried yet?\n\
+         4. Is the retrieved context fresh enough, or should you check for staleness?\n\n\
+         If you believe you have enough context, proceed with the task. \
+         Otherwise, perform additional targeted searches before continuing.",
+        unique_count = unique_queries.len(),
+    );
+
+    let response_data = json!({
+        "session_summary": {
+            "search_count": search_count,
+            "unique_queries": unique_queries,
+            "scope_distribution": scope_counts,
+            "total_code_results": total_code_results,
+            "total_knowledge_results": total_knowledge_results,
+            "total_search_time_ms": total_search_time_ms,
+        },
+        "searches": queries_list,
+        "evaluation_prompt": evaluation_prompt,
+    });
+
+    JsonRpcResponse::success(
+        request.id.clone(),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": response_data.to_string()
+            }],
+            "isError": false
+        }),
+    )
+}
+
 fn tool_error_response(request: &JsonRpcRequest, message: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         request.id.clone(),
@@ -1631,7 +1786,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = responses[0].result.as_ref().unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_search"));
         assert!(names.contains(&"engram_lookup"));
@@ -1642,6 +1797,7 @@ mod tests {
         assert!(names.contains(&"engram_record_glossary"));
         assert!(names.contains(&"engram_snapshot"));
         assert!(names.contains(&"engram_onboard"));
+        assert!(names.contains(&"engram_assess_context"));
     }
 
     #[tokio::test]
@@ -3598,5 +3754,176 @@ mod tests {
             .unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"engram_onboard"));
+    }
+
+    // --- engram_assess_context tests ---
+
+    #[tokio::test]
+    async fn test_assess_context_no_engine() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {}})),
+        );
+        let responses = run_server(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_empty_session() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert_eq!(data["session_summary"]["search_count"], 0);
+        assert!(data["session_summary"]["unique_queries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(data["session_summary"]["total_code_results"], 0);
+        assert_eq!(data["session_summary"]["total_knowledge_results"], 0);
+        assert!(data["searches"].as_array().unwrap().is_empty());
+        assert!(data["evaluation_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("0 search(es)"));
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_after_searches() {
+        // Send two search requests then an assess_context request through the same server
+        let search1 = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate total", "scope": "code"}})),
+        );
+        let search2 = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "render button", "scope": "all"}})),
+        );
+        let assess = make_request(
+            3,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {}})),
+        );
+        let input = format!("{search1}\n{search2}\n{assess}");
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 3);
+
+        let data = parse_tool_text(&responses[2]);
+        assert_eq!(data["session_summary"]["search_count"], 2);
+        let unique_queries = data["session_summary"]["unique_queries"]
+            .as_array()
+            .unwrap();
+        assert_eq!(unique_queries.len(), 2);
+        assert!(data["session_summary"]["total_code_results"].as_u64().unwrap() > 0);
+        assert_eq!(data["searches"].as_array().unwrap().len(), 2);
+        assert!(data["evaluation_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("2 search(es)"));
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_with_task_description() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {"task_description": "Fix the auth bug in login flow"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let data = parse_tool_text(&responses[0]);
+        assert!(data["evaluation_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Fix the auth bug in login flow"));
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_tracks_duplicate_queries() {
+        // Same query twice should show 2 searches but 1 unique query
+        let search1 = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate total"}})),
+        );
+        let search2 = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate total"}})),
+        );
+        let assess = make_request(
+            3,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {}})),
+        );
+        let input = format!("{search1}\n{search2}\n{assess}");
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 3);
+
+        let data = parse_tool_text(&responses[2]);
+        assert_eq!(data["session_summary"]["search_count"], 2);
+        assert_eq!(
+            data["session_summary"]["unique_queries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_scope_distribution() {
+        let search1 = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "foo", "scope": "code"}})),
+        );
+        let search2 = make_request(
+            2,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "bar", "scope": "code"}})),
+        );
+        let search3 = make_request(
+            3,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "baz", "scope": "docs"}})),
+        );
+        let assess = make_request(
+            4,
+            "tools/call",
+            Some(json!({"name": "engram_assess_context", "arguments": {}})),
+        );
+        let input = format!("{search1}\n{search2}\n{search3}\n{assess}");
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 4);
+
+        let data = parse_tool_text(&responses[3]);
+        let scope_dist = &data["session_summary"]["scope_distribution"];
+        assert_eq!(scope_dist["code"], 2);
+        assert_eq!(scope_dist["docs"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_assess_context_listed_in_tools() {
+        let input = make_request(1, "tools/list", None);
+        let responses = run_server(&input).await;
+        let tools = responses[0].result.as_ref().unwrap()["tools"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"engram_assess_context"));
     }
 }
