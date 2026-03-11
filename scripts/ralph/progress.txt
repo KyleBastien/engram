@@ -1490,3 +1490,23 @@ Started: 03/09/2026 17:15:47
   - `sanitize_timestamp` also useful for session IDs in filenames (colons → hyphens)
   - serde_yaml 0.9 now a dependency of engram-bench (joins engram-core and engram-ingest)
 ---
+
+## 2026-03-10 - US-086
+- Implemented 3 benchmark MCP tools: engram_benchmark_start, engram_benchmark_log, engram_benchmark_end
+- Added `benchmark_tool_definitions()` to tools.rs with full input schemas
+- Added `BenchmarkHarness` and `ActiveBenchmark` tracking to EngineState in server.rs
+- Wired benchmark tools into handle_tools_list, handle_tools_call, and all_tool_names
+- Integrated with handle_engram_search: baseline mode disables search, assisted mode auto-logs BenchmarkEvents
+- Updated `set_boot_info` to initialize BenchmarkHarness with store_path
+- Updated 7 test assertions for new tool count (16 → 19): all_tool_names, allowed_tools, tools_list tests
+- Added 6 new tool definition tests for benchmark tools
+- engram-bench added as dependency to engram-mcp
+- All 251 tests pass, clippy clean
+- Files changed: crates/engram-mcp/Cargo.toml, crates/engram-mcp/src/tools.rs, crates/engram-mcp/src/server.rs, Cargo.lock
+- **Learnings for future iterations:**
+  - BenchmarkHarness is initialized with default store path in constructors, then re-initialized with real path in set_boot_info
+  - ActiveBenchmark uses Mutex<Option<>> for one-at-a-time benchmark session tracking
+  - Search integration pattern: clone active benchmark info at start of handler, check mode for disable/auto-log
+  - When adding tools to all_tool_names(), must update: all_tool_names set, allowed_tools tests (3 contexts), tools_list tests (4), and custom context tests (2)
+  - New tool category functions must be imported in server.rs and merged in handle_tools_list via tools.extend()
+---
