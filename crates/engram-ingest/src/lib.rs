@@ -3,6 +3,7 @@ mod detect;
 mod diff;
 mod hash;
 mod markdown;
+mod metadata;
 mod pipeline;
 mod sliding;
 
@@ -11,5 +12,6 @@ pub use detect::{detect_language, ChunkerKind};
 pub use diff::{detect_changed_files, ChangedFiles};
 pub use hash::{content_hash, has_chunk_changed};
 pub use markdown::MarkdownChunker;
+pub use metadata::detect_project_metadata;
 pub use pipeline::{IngestPipeline, IngestReport};
 pub use sliding::SlidingWindowChunker;
