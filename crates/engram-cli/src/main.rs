@@ -92,6 +92,16 @@ enum BenchmarkAction {
     },
 }
 
+#[derive(Subcommand)]
+enum HooksAction {
+    /// Install git hooks into configured source repositories
+    Install {
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+}
+
 impl From<DepthArg> for OnboardingDepth {
     fn from(d: DepthArg) -> Self {
         match d {
@@ -132,6 +142,10 @@ enum Commands {
         /// Initialize from a remote git URL
         #[arg(long, conflicts_with = "local")]
         remote: Option<String>,
+
+        /// Also install git hooks into configured source repos
+        #[arg(long)]
+        hooks: bool,
 
         /// Path for the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
@@ -182,6 +196,12 @@ enum Commands {
     Benchmark {
         #[command(subcommand)]
         action: BenchmarkAction,
+    },
+
+    /// Manage git hooks for automatic reindexing
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
     },
 
     /// Reindex source repositories
@@ -542,6 +562,7 @@ async fn main() {
         Commands::Init {
             local,
             remote,
+            hooks,
             path,
         } => {
             if !local && remote.is_none() {
@@ -578,6 +599,17 @@ async fn main() {
                         process::exit(1);
                     }
                 }
+            }
+
+            if hooks {
+                let config = match load_config(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Warning: could not load config for hooks install: {e}");
+                        return;
+                    }
+                };
+                install_hooks_for_sources(&config.sources);
             }
         }
         Commands::Onboard { depth, repo, path } => {
@@ -919,6 +951,96 @@ async fn main() {
 
             println!("Sync complete.");
         }
+        Commands::Hooks { action } => match action {
+            HooksAction::Install { path } => {
+                if !path.join(".engram").exists() {
+                    eprintln!("Error: no engram store found at {}", path.display());
+                    eprintln!("Hint: run `engram init --local` first");
+                    process::exit(1);
+                }
+
+                let config = match load_config(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    }
+                };
+
+                if config.sources.is_empty() {
+                    eprintln!("Error: no source repos configured in engram.config.yaml");
+                    process::exit(1);
+                }
+
+                install_hooks_for_sources(&config.sources);
+            }
+        },
+    }
+}
+
+/// The hook script content that calls engram reindex.
+const HOOK_MARKER: &str = "# engram-hook-start";
+const HOOK_MARKER_END: &str = "# engram-hook-end";
+
+fn engram_hook_block() -> String {
+    format!(
+        "{HOOK_MARKER}\nengram reindex --incremental --commit HEAD\n{HOOK_MARKER_END}\n"
+    )
+}
+
+/// Install git hooks (post-commit, post-merge, post-checkout) into each configured source repo.
+fn install_hooks_for_sources(sources: &[SourceConfig]) {
+    let hook_names = ["post-commit", "post-merge", "post-checkout"];
+    let hook_block = engram_hook_block();
+
+    for source in sources {
+        let repo_path = PathBuf::from(&source.path);
+        let hooks_dir = repo_path.join(".git/hooks");
+
+        if !hooks_dir.exists() {
+            eprintln!(
+                "Warning: {} is not a git repository (no .git/hooks), skipping",
+                source.name
+            );
+            continue;
+        }
+
+        println!("Installing hooks for '{}'...", source.name);
+
+        for hook_name in &hook_names {
+            let hook_path = hooks_dir.join(hook_name);
+
+            if hook_path.exists() {
+                // Read existing content; append if our block isn't already there
+                let existing = fs::read_to_string(&hook_path).unwrap_or_default();
+                if existing.contains(HOOK_MARKER) {
+                    println!("  {hook_name}: already installed, skipping");
+                    continue;
+                }
+                // Append our block
+                let new_content = format!("{existing}\n{hook_block}");
+                if let Err(e) = fs::write(&hook_path, new_content) {
+                    eprintln!("  {hook_name}: failed to append: {e}");
+                    continue;
+                }
+            } else {
+                // Create new hook script
+                let content = format!("#!/bin/sh\n{hook_block}");
+                if let Err(e) = fs::write(&hook_path, content) {
+                    eprintln!("  {hook_name}: failed to create: {e}");
+                    continue;
+                }
+            }
+
+            // Make executable on unix
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755));
+            }
+
+            println!("  {hook_name}: installed");
+        }
     }
 }
 
@@ -936,7 +1058,8 @@ mod tests {
     use engram_store::{read_manifest, write_manifest};
 
     use super::{
-        load_config, run_reindex, BenchmarkAction, Cli, Commands, DepthArg, SyncMode, Transport,
+        load_config, run_reindex, install_hooks_for_sources, engram_hook_block, HOOK_MARKER,
+        BenchmarkAction, Cli, Commands, DepthArg, HooksAction, SyncMode, Transport,
     };
 
     // --- Mock embedding provider for tests ---
@@ -1356,7 +1479,7 @@ mod tests {
 
         let cli = Cli::parse_from(["engram", "init", "--local"]);
         match cli.command {
-            Commands::Init { local, remote, path } => {
+            Commands::Init { local, remote, path, .. } => {
                 assert!(local);
                 assert!(remote.is_none());
                 assert_eq!(path, PathBuf::from("engram-store"));
@@ -1371,7 +1494,7 @@ mod tests {
 
         let cli = Cli::parse_from(["engram", "init", "--local", "--path", "/tmp/my-store"]);
         match cli.command {
-            Commands::Init { local, remote, path } => {
+            Commands::Init { local, remote, path, .. } => {
                 assert!(local);
                 assert!(remote.is_none());
                 assert_eq!(path, PathBuf::from("/tmp/my-store"));
@@ -1886,6 +2009,7 @@ mod tests {
                 local,
                 remote,
                 path,
+                ..
             } => {
                 assert!(!local);
                 assert_eq!(remote, Some("https://github.com/org/repo.git".to_string()));
@@ -1911,6 +2035,7 @@ mod tests {
                 local,
                 remote,
                 path,
+                ..
             } => {
                 assert!(!local);
                 assert_eq!(remote, Some("https://github.com/org/repo.git".to_string()));
@@ -2110,5 +2235,170 @@ mod tests {
             }
             _ => panic!("expected Benchmark Report command"),
         }
+    }
+
+    // --- Hooks CLI tests ---
+
+    #[test]
+    fn test_hooks_install_parses() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "hooks", "install"]);
+        match cli.command {
+            Commands::Hooks {
+                action: HooksAction::Install { path },
+            } => {
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Hooks Install command"),
+        }
+    }
+
+    #[test]
+    fn test_hooks_install_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "hooks", "install", "--path", "/tmp/store"]);
+        match cli.command {
+            Commands::Hooks {
+                action: HooksAction::Install { path },
+            } => {
+                assert_eq!(path, PathBuf::from("/tmp/store"));
+            }
+            _ => panic!("expected Hooks Install command"),
+        }
+    }
+
+    #[test]
+    fn test_init_with_hooks_flag() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "init", "--local", "--hooks"]);
+        match cli.command {
+            Commands::Init { local, hooks, .. } => {
+                assert!(local);
+                assert!(hooks);
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_without_hooks_flag() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "init", "--local"]);
+        match cli.command {
+            Commands::Init { hooks, .. } => {
+                assert!(!hooks);
+            }
+            _ => panic!("expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_install_hooks_creates_new_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-repo");
+        fs::create_dir_all(repo_path.join(".git/hooks")).unwrap();
+
+        let sources = vec![SourceConfig {
+            name: "my-repo".to_string(),
+            path: repo_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+
+        install_hooks_for_sources(&sources);
+
+        for hook_name in &["post-commit", "post-merge", "post-checkout"] {
+            let hook_path = repo_path.join(format!(".git/hooks/{hook_name}"));
+            assert!(hook_path.exists(), "{hook_name} should exist");
+
+            let content = fs::read_to_string(&hook_path).unwrap();
+            assert!(content.starts_with("#!/bin/sh"), "{hook_name} should have shebang");
+            assert!(content.contains("engram reindex --incremental --commit HEAD"));
+            assert!(content.contains(HOOK_MARKER));
+
+            // Check executable permission on unix
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = fs::metadata(&hook_path).unwrap().permissions();
+                assert_eq!(perms.mode() & 0o755, 0o755, "{hook_name} should be executable");
+            }
+        }
+    }
+
+    #[test]
+    fn test_install_hooks_appends_to_existing() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-repo");
+        fs::create_dir_all(repo_path.join(".git/hooks")).unwrap();
+
+        // Create a pre-existing hook
+        let existing_content = "#!/bin/sh\necho 'existing hook'\n";
+        fs::write(repo_path.join(".git/hooks/post-commit"), existing_content).unwrap();
+
+        let sources = vec![SourceConfig {
+            name: "my-repo".to_string(),
+            path: repo_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+
+        install_hooks_for_sources(&sources);
+
+        let content = fs::read_to_string(repo_path.join(".git/hooks/post-commit")).unwrap();
+        // Should preserve existing content
+        assert!(content.contains("echo 'existing hook'"));
+        // Should also have our hook
+        assert!(content.contains("engram reindex --incremental --commit HEAD"));
+    }
+
+    #[test]
+    fn test_install_hooks_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-repo");
+        fs::create_dir_all(repo_path.join(".git/hooks")).unwrap();
+
+        let sources = vec![SourceConfig {
+            name: "my-repo".to_string(),
+            path: repo_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+
+        // Install twice
+        install_hooks_for_sources(&sources);
+        install_hooks_for_sources(&sources);
+
+        let content = fs::read_to_string(repo_path.join(".git/hooks/post-commit")).unwrap();
+        // Should only contain the hook block once
+        let count = content.matches(HOOK_MARKER).count();
+        assert_eq!(count, 1, "hook block should appear exactly once");
+    }
+
+    #[test]
+    fn test_install_hooks_skips_non_git_repo() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("not-a-repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        // No .git/hooks directory
+
+        let sources = vec![SourceConfig {
+            name: "not-a-repo".to_string(),
+            path: repo_path.to_string_lossy().to_string(),
+            include: vec![],
+            exclude: vec![],
+        }];
+
+        // Should not panic, just skip
+        install_hooks_for_sources(&sources);
+
+        assert!(!repo_path.join(".git/hooks/post-commit").exists());
+    }
+
+    #[test]
+    fn test_engram_hook_block_content() {
+        let block = engram_hook_block();
+        assert!(block.contains(HOOK_MARKER));
+        assert!(block.contains("engram reindex --incremental --commit HEAD"));
     }
 }

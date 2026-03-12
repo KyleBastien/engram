@@ -1850,3 +1850,20 @@ Started: 03/09/2026 17:15:47
   - `is_lsp_backend()` uses `is_some_and()` per clippy `unnecessary_map_or` lint
   - `collect_source_files` and `detect_patterns` in abstractions.rs are `pub(crate)` for reuse by onboarding LSP path
 ---
+
+## 2026-03-11 - US-106
+- Implemented `engram hooks install` CLI subcommand with `HooksAction::Install` enum
+- Added `--hooks` flag to `engram init` command for hook installation during store creation
+- Installs post-commit, post-merge, post-checkout hooks into each configured source repo's `.git/hooks/`
+- Hooks call `engram reindex --incremental --commit HEAD`
+- If hooks already exist, appends engram block (does not overwrite); uses marker comments for idempotency
+- Prints which hooks were installed per source repo
+- Skips non-git repos with a warning
+- Makes hook scripts executable on unix (0o755)
+- Files changed: crates/engram-cli/src/main.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - Hook block uses `HOOK_MARKER` / `HOOK_MARKER_END` sentinel comments for idempotent append detection
+  - `Commands` enum pattern for subcommands with actions: use `Hooks { #[command(subcommand)] action: HooksAction }`
+  - When adding fields to enum variants (like `hooks` to `Init`), update ALL pattern matches in tests using `..` for forward compat
+  - `#[cfg(unix)]` block for `set_permissions` to set executable mode
+---
