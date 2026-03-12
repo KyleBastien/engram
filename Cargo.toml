@@ -12,6 +12,7 @@ members = [
     "crates/engram-providers/openai",
     "crates/engram-providers/voyage",
     "crates/engram-providers/onnx",
+    "crates/engram-providers/custom",
     "crates/engram-bench",
     "crates/engram-dashboard",
 ]
