@@ -1657,3 +1657,19 @@ Started: 03/09/2026 17:15:47
   - DashboardState now has 5 data fields: health, knowledge, search_analytics, benchmarks, sessions
   - For 404 responses with JSON body, return `(StatusCode::NOT_FOUND, Json(json!({...}))).into_response()` with explicit Response return type
 ---
+
+## 2026-03-11 - US-095
+- Implemented benchmark CLI commands: `engram benchmark run` and `engram benchmark report`
+- `benchmark run --task <desc> [--baseline|--assisted]` runs single-mode or both-mode (baseline+assisted with comparison)
+- `benchmark report [--last|--all|--compare <id1> <id2>]` views stored benchmark results
+- Added helper functions to engram-bench: list_runs(), format_report_table(), format_comparison_table(), format_runs_list(), StoredRun type
+- Output is human-readable table format for all report views
+- Added 10 new CLI arg-parsing tests for benchmark subcommands (63 total CLI tests pass)
+- All 13 engram-bench tests pass
+- Files changed: crates/engram-bench/src/lib.rs, crates/engram-cli/src/main.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - clap nested subcommands: use `#[command(subcommand)]` field in parent variant; define separate enum for sub-actions
+  - `#[arg(num_args = 2)]` for fixed multi-value args; `conflicts_with_all` for mutual exclusion across 3+ flags
+  - benchmark runs stored as JSONL in `{store}/metrics/runs/`; first line=session, middle=events, last line=report
+  - engram-bench list_runs() reads back from disk; sorted by filename (timestamp prefix ensures chronological order)
+---

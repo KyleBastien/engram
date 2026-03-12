@@ -120,6 +120,140 @@ impl BenchmarkHarness {
     }
 }
 
+/// A stored benchmark run loaded from disk.
+#[derive(Debug, Clone)]
+pub struct StoredRun {
+    pub session: BenchmarkSession,
+    pub events: Vec<BenchmarkEvent>,
+    pub report: BenchmarkReport,
+    pub filename: String,
+}
+
+/// List all stored benchmark runs, sorted by filename (most recent last).
+pub fn list_runs(store_root: &std::path::Path) -> Vec<StoredRun> {
+    let runs_dir = store_root.join("metrics").join("runs");
+    let entries = match fs::read_dir(&runs_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "jsonl")
+        })
+        .collect();
+
+    paths.sort_by_key(|e| e.file_name());
+
+    paths
+        .into_iter()
+        .filter_map(|entry| load_run_from_path(&entry.path(), &entry.file_name().to_string_lossy()))
+        .collect()
+}
+
+/// Load a single run from a JSONL file path.
+fn load_run_from_path(path: &std::path::Path, filename: &str) -> Option<StoredRun> {
+    let content = fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let session: BenchmarkSession = serde_json::from_str(lines[0]).ok()?;
+    let report: BenchmarkReport = serde_json::from_str(lines[lines.len() - 1]).ok()?;
+    let events: Vec<BenchmarkEvent> = lines[1..lines.len() - 1]
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    Some(StoredRun {
+        session,
+        events,
+        report,
+        filename: filename.to_string(),
+    })
+}
+
+/// Format a benchmark report as a human-readable table.
+pub fn format_report_table(report: &BenchmarkReport, session: &BenchmarkSession) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Session:   {}\n", report.session_id));
+    out.push_str(&format!("Mode:      {:?}\n", report.mode));
+    out.push_str(&format!("Task:      {}\n", session.task_description));
+    out.push_str(&format!("Started:   {}\n", session.started_at));
+    if let Some(ref ended) = session.ended_at {
+        out.push_str(&format!("Ended:     {ended}\n"));
+    }
+    if let Some(ref outcome) = session.task_outcome {
+        out.push_str(&format!("Outcome:   {outcome:?}\n"));
+    }
+    out.push('\n');
+    out.push_str(&format!("{:<25} {}\n", "Metric", "Value"));
+    out.push_str(&format!("{:<25} {}\n", "-------------------------", "----------"));
+    out.push_str(&format!("{:<25} {:.2}\n", "Token Efficiency", report.token_efficiency));
+    out.push_str(&format!("{:<25} {:.4}\n", "Retrieval Precision", report.retrieval_precision));
+    out.push_str(&format!("{:<25} {:.4}\n", "Retrieval Recall", report.retrieval_recall));
+    out.push_str(&format!("{:<25} {}ms\n", "Time to First Edit", report.time_to_first_edit_ms));
+    out.push_str(&format!("{:<25} {}\n", "File Read Count", report.file_read_count));
+    out.push_str(&format!("{:<25} {:.4}\n", "Search-to-Read Ratio", report.search_to_read_ratio));
+    out.push_str(&format!("{:<25} {}\n", "Context Waste Tokens", report.context_waste_tokens));
+    out
+}
+
+/// Format a comparison report as a human-readable side-by-side table.
+pub fn format_comparison_table(report: &ComparisonReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Baseline:  {}\n", report.baseline_session_id));
+    out.push_str(&format!("Assisted:  {}\n", report.assisted_session_id));
+    out.push('\n');
+    out.push_str(&format!(
+        "{:<25} {:>12} {:>12} {:>10} {:>8}\n",
+        "Metric", "Baseline", "Assisted", "Diff", "Better?"
+    ));
+    out.push_str(&format!(
+        "{:<25} {:>12} {:>12} {:>10} {:>8}\n",
+        "-------------------------", "------------", "------------", "----------", "--------"
+    ));
+    for m in &report.metrics {
+        let better = if m.assisted_better { "  yes" } else { "   no" };
+        out.push_str(&format!(
+            "{:<25} {:>12.2} {:>12.2} {:>+9.2}% {}\n",
+            m.metric_name, m.baseline_value, m.assisted_value, m.percentage_diff, better
+        ));
+    }
+    out
+}
+
+/// Format a listing of all runs as a human-readable table.
+pub fn format_runs_list(runs: &[StoredRun]) -> String {
+    if runs.is_empty() {
+        return "No benchmark runs found.\n".to_string();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<38} {:<12} {:<25} {}\n",
+        "Session ID", "Mode", "Started", "Task"
+    ));
+    out.push_str(&format!(
+        "{:<38} {:<12} {:<25} {}\n",
+        "--------------------------------------", "------------", "-------------------------", "----"
+    ));
+    for run in runs {
+        let mode = format!("{:?}", run.report.mode);
+        let task = if run.session.task_description.len() > 40 {
+            format!("{}...", &run.session.task_description[..37])
+        } else {
+            run.session.task_description.clone()
+        };
+        out.push_str(&format!(
+            "{:<38} {:<12} {:<25} {}\n",
+            run.session.session_id, mode, run.session.started_at, task
+        ));
+    }
+    out
+}
+
 /// Compute metrics from a list of events and a completed session.
 pub fn compute_metrics(events: &[BenchmarkEvent], session: &BenchmarkSession) -> BenchmarkReport {
     let token_efficiency: f64 = events.iter().map(|e| e.tokens_used as f64).sum();

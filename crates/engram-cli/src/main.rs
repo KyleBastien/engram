@@ -5,7 +5,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use engram_core::{EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig};
+use engram_bench::{
+    compare, format_comparison_table, format_report_table, format_runs_list, list_runs,
+    write_comparison_report, BenchmarkHarness,
+};
+use engram_core::{
+    BenchmarkMode, EmbeddingProvider, OnboardingDepth, SourceConfig, StoreConfig, TaskOutcome,
+};
 use engram_ingest::{IngestPipeline, IngestReport};
 use engram_dashboard::{
     serve_dashboard, CacheStatus, DashboardState, EventBroadcaster, HealthSnapshot,
@@ -42,6 +48,47 @@ enum SyncMode {
     Pull,
     Push,
     Both,
+}
+
+#[derive(Subcommand)]
+enum BenchmarkAction {
+    /// Run a benchmark: orchestrate baseline and assisted sessions, then compare
+    Run {
+        /// Task description for the benchmark
+        #[arg(long)]
+        task: String,
+
+        /// Run in baseline mode (no engram assistance)
+        #[arg(long, conflicts_with = "assisted")]
+        baseline: bool,
+
+        /// Run in assisted mode (with engram)
+        #[arg(long, conflicts_with = "baseline")]
+        assisted: bool,
+
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
+    /// View benchmark results
+    Report {
+        /// Show the most recent run
+        #[arg(long, conflicts_with_all = &["all", "compare"])]
+        last: bool,
+
+        /// List all benchmark runs
+        #[arg(long, conflicts_with_all = &["last", "compare"])]
+        all: bool,
+
+        /// Compare two runs by session ID
+        #[arg(long, num_args = 2, value_names = &["BASELINE_ID", "ASSISTED_ID"], conflicts_with_all = &["last", "all"])]
+        compare: Option<Vec<String>>,
+
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
 }
 
 impl From<DepthArg> for OnboardingDepth {
@@ -128,6 +175,12 @@ enum Commands {
         /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
         path: PathBuf,
+    },
+
+    /// Run and view benchmarks
+    Benchmark {
+        #[command(subcommand)]
+        action: BenchmarkAction,
     },
 
     /// Reindex source repositories
@@ -584,6 +637,114 @@ async fn main() {
                 }
             }
         }
+        Commands::Benchmark { action } => match action {
+            BenchmarkAction::Run {
+                task,
+                baseline,
+                assisted,
+                path,
+            } => {
+                let mode = if baseline {
+                    BenchmarkMode::Baseline
+                } else if assisted {
+                    BenchmarkMode::Assisted
+                } else {
+                    // Default: run both baseline then assisted, then compare
+                    let harness = BenchmarkHarness::new(path.clone());
+
+                    println!("Starting baseline session...");
+                    let baseline_id = harness.start(BenchmarkMode::Baseline, task.clone());
+                    let baseline_report =
+                        harness.end(&baseline_id, TaskOutcome::Success, None);
+                    println!("Baseline session complete: {}", baseline_id);
+
+                    println!("\nStarting assisted session...");
+                    let assisted_id = harness.start(BenchmarkMode::Assisted, task);
+                    let assisted_report =
+                        harness.end(&assisted_id, TaskOutcome::Success, None);
+                    println!("Assisted session complete: {}", assisted_id);
+
+                    let comparison = compare(&baseline_report, &assisted_report);
+                    write_comparison_report(&path, &comparison);
+
+                    println!("\n{}", format_comparison_table(&comparison));
+                    return;
+                };
+
+                let harness = BenchmarkHarness::new(path.clone());
+                println!("Starting {:?} session...", mode);
+                let session_id = harness.start(mode, task);
+                let report = harness.end(&session_id, TaskOutcome::Success, None);
+
+                let runs = list_runs(&path);
+                if let Some(run) = runs.iter().find(|r| r.session.session_id == session_id) {
+                    println!("\n{}", format_report_table(&report, &run.session));
+                } else {
+                    println!("Session complete: {}", session_id);
+                }
+            }
+            BenchmarkAction::Report {
+                last,
+                all,
+                compare: compare_ids,
+                path,
+            } => {
+                let runs = list_runs(&path);
+
+                if let Some(ids) = compare_ids {
+                    let r1 = runs
+                        .iter()
+                        .find(|r| r.session.session_id == ids[0]);
+                    let r2 = runs
+                        .iter()
+                        .find(|r| r.session.session_id == ids[1]);
+
+                    match (r1, r2) {
+                        (Some(baseline), Some(assisted)) => {
+                            let comparison =
+                                compare(&baseline.report, &assisted.report);
+                            write_comparison_report(&path, &comparison);
+                            print!("{}", format_comparison_table(&comparison));
+                        }
+                        (None, _) => {
+                            eprintln!("Error: session '{}' not found", ids[0]);
+                            process::exit(1);
+                        }
+                        (_, None) => {
+                            eprintln!("Error: session '{}' not found", ids[1]);
+                            process::exit(1);
+                        }
+                    }
+                } else if all {
+                    print!("{}", format_runs_list(&runs));
+                } else if last {
+                    match runs.last() {
+                        Some(run) => {
+                            print!(
+                                "{}",
+                                format_report_table(&run.report, &run.session)
+                            );
+                        }
+                        None => {
+                            println!("No benchmark runs found.");
+                        }
+                    }
+                } else {
+                    // Default to --last if no flags
+                    match runs.last() {
+                        Some(run) => {
+                            print!(
+                                "{}",
+                                format_report_table(&run.report, &run.session)
+                            );
+                        }
+                        None => {
+                            println!("No benchmark runs found.");
+                        }
+                    }
+                }
+            }
+        },
         Commands::Reindex {
             full,
             incremental: _,
@@ -734,7 +895,9 @@ mod tests {
     use engram_core::Manifest;
     use engram_store::{read_manifest, write_manifest};
 
-    use super::{load_config, run_reindex, Cli, Commands, DepthArg, SyncMode, Transport};
+    use super::{
+        load_config, run_reindex, BenchmarkAction, Cli, Commands, DepthArg, SyncMode, Transport,
+    };
 
     // --- Mock embedding provider for tests ---
 
@@ -1687,5 +1850,184 @@ mod tests {
             "https://github.com/org/repo.git",
         ]);
         assert!(result.is_err());
+    }
+
+    // --- Benchmark CLI arg parsing tests ---
+
+    #[test]
+    fn test_benchmark_run_with_task_and_baseline() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "benchmark",
+            "run",
+            "--task",
+            "fix login bug",
+            "--baseline",
+        ]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Run {
+                    task, baseline, assisted, ..
+                },
+            } => {
+                assert_eq!(task, "fix login bug");
+                assert!(baseline);
+                assert!(!assisted);
+            }
+            _ => panic!("expected Benchmark Run command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_run_with_task_and_assisted() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "benchmark",
+            "run",
+            "--task",
+            "fix login bug",
+            "--assisted",
+        ]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Run {
+                    task, baseline, assisted, ..
+                },
+            } => {
+                assert_eq!(task, "fix login bug");
+                assert!(!baseline);
+                assert!(assisted);
+            }
+            _ => panic!("expected Benchmark Run command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_run_baseline_and_assisted_conflict() {
+        use clap::Parser;
+        let result = Cli::try_parse_from([
+            "engram",
+            "benchmark",
+            "run",
+            "--task",
+            "test",
+            "--baseline",
+            "--assisted",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_benchmark_run_no_mode_defaults() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "benchmark",
+            "run",
+            "--task",
+            "do something",
+        ]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Run {
+                    baseline, assisted, ..
+                },
+            } => {
+                assert!(!baseline);
+                assert!(!assisted);
+            }
+            _ => panic!("expected Benchmark Run command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_report_last() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "benchmark", "report", "--last"]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Report {
+                    last, all, compare, ..
+                },
+            } => {
+                assert!(last);
+                assert!(!all);
+                assert!(compare.is_none());
+            }
+            _ => panic!("expected Benchmark Report command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_report_all() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "benchmark", "report", "--all"]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Report {
+                    last, all, compare, ..
+                },
+            } => {
+                assert!(!last);
+                assert!(all);
+                assert!(compare.is_none());
+            }
+            _ => panic!("expected Benchmark Report command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_report_compare() {
+        use clap::Parser;
+        let cli = Cli::parse_from([
+            "engram",
+            "benchmark",
+            "report",
+            "--compare",
+            "id-1",
+            "id-2",
+        ]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Report {
+                    last, all, compare, ..
+                },
+            } => {
+                assert!(!last);
+                assert!(!all);
+                let ids = compare.unwrap();
+                assert_eq!(ids, vec!["id-1", "id-2"]);
+            }
+            _ => panic!("expected Benchmark Report command"),
+        }
+    }
+
+    #[test]
+    fn test_benchmark_report_last_and_all_conflict() {
+        use clap::Parser;
+        let result = Cli::try_parse_from([
+            "engram",
+            "benchmark",
+            "report",
+            "--last",
+            "--all",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_benchmark_report_default_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "benchmark", "report", "--last"]);
+        match cli.command {
+            Commands::Benchmark {
+                action: BenchmarkAction::Report { path, .. },
+            } => {
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Benchmark Report command"),
+        }
     }
 }
