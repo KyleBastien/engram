@@ -23,6 +23,7 @@ pub fn extract_key_abstractions(
         "rust" => Some(Language::Rust),
         "typescript" | "javascript" => Some(Language::TypeScript),
         "python" => Some(Language::Python),
+        "go" | "golang" => Some(Language::Go),
         _ => None,
     };
 
@@ -192,6 +193,7 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
     };
     parser
         .set_language(&ts_language)
@@ -214,6 +216,9 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
             }
             Language::Python => {
                 extract_python_declarations(&child, source, rel_path, &mut declarations);
+            }
+            Language::Go => {
+                extract_go_declarations(&child, source, rel_path, &mut declarations);
             }
         }
     }
@@ -409,6 +414,41 @@ fn extract_python_declarations(
     }
 }
 
+fn extract_go_declarations(
+    node: &Node,
+    source: &str,
+    file: &str,
+    decls: &mut Vec<RawDeclaration>,
+) {
+    if node.kind() == "type_declaration" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "type_spec" {
+                if let Some(name) = field_text(&child, "name", source) {
+                    // Determine kind from the type field
+                    let kind = child
+                        .child_by_field_name("type")
+                        .map(|t| match t.kind() {
+                            "struct_type" => "struct",
+                            "interface_type" => "interface",
+                            _ => "type",
+                        })
+                        .unwrap_or("type");
+                    let is_exported = name.starts_with(|c: char| c.is_ascii_uppercase());
+                    let description = extract_doc_comment(node, source);
+                    decls.push(RawDeclaration {
+                        name,
+                        kind: kind.to_string(),
+                        file: file.to_string(),
+                        description,
+                        is_exported,
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn field_text(node: &Node, field: &str, source: &str) -> Option<String> {
     let child = node.child_by_field_name(field)?;
     Some(source[child.start_byte()..child.end_byte()].to_string())
@@ -583,6 +623,26 @@ pub(crate) fn detect_patterns(abstractions: &[Abstraction], language: &str) -> V
                         name: "Class-based design".to_string(),
                         description: "Uses classes for data and behavior organization".to_string(),
                         examples: classes.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+        }
+        "go" | "golang" => {
+            if let Some(interfaces) = kind_counts.get("interface") {
+                if interfaces.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Interface-driven design".to_string(),
+                        description: "Uses interfaces to define behavioral contracts".to_string(),
+                        examples: interfaces.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+            if let Some(structs) = kind_counts.get("struct") {
+                if structs.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Struct-based modeling".to_string(),
+                        description: "Uses structs for data modeling".to_string(),
+                        examples: structs.iter().take(3).map(|s| s.to_string()).collect(),
                     });
                 }
             }

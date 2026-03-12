@@ -19,6 +19,7 @@ pub enum Language {
     TypeScript,
     Rust,
     Python,
+    Go,
 }
 
 /// Extracts semantic chunks from source code using tree-sitter AST parsing.
@@ -36,6 +37,7 @@ impl TreeSitterChunker {
             Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
+            Language::Go => tree_sitter_go::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -58,6 +60,7 @@ impl TreeSitterChunker {
                 Language::TypeScript => self.extract_ts_node(&child, source),
                 Language::Rust => self.extract_rust_node(&child, source),
                 Language::Python => self.extract_python_node(&child, source),
+                Language::Go => self.extract_go_node(&child, source),
             };
             if let Some(chunk) = extracted {
                 // Flush accumulated module content before this declaration
@@ -252,6 +255,54 @@ impl TreeSitterChunker {
             "macro_definition" => {
                 let name = field_text(node, "name", source)?;
                 Some(make_chunk(ChunkKind::Function, name, node, source))
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_go_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
+        match node.kind() {
+            "function_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Function, name, node, source))
+            }
+            "method_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Method, name, node, source))
+            }
+            "type_declaration" => {
+                // type_declaration contains one or more type_spec children
+                // For single type decls, extract the name from the type_spec
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "type_spec" {
+                        let name = field_text(&child, "name", source)?;
+                        return Some(make_chunk(ChunkKind::Type, name, node, source));
+                    }
+                }
+                None
+            }
+            "const_declaration" => {
+                // const_declaration contains const_spec children
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "const_spec" {
+                        let name = field_text(&child, "name", source)?;
+                        return Some(make_chunk(ChunkKind::Other, name, node, source));
+                    }
+                }
+                None
+            }
+            "var_declaration" => {
+                // var_declaration contains var_spec children
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "var_spec" {
+                        let name = field_text(&child, "name", source)?;
+                        return Some(make_chunk(ChunkKind::Other, name, node, source));
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -864,5 +915,166 @@ mod python_tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].kind, ChunkKind::Function);
         assert_eq!(chunks[0].name, "fetch_data");
+    }
+}
+
+#[cfg(test)]
+mod go_tests {
+    use super::*;
+
+    fn chunk_go(source: &str) -> Vec<RawChunk> {
+        let chunker = TreeSitterChunker::new();
+        chunker.chunk_file(Path::new("test.go"), source, Language::Go)
+    }
+
+    #[test]
+    fn extracts_function_declaration() {
+        let source = "package main\n\nfunc greet(name string) string {\n\treturn \"Hello, \" + name\n}";
+        let chunks = chunk_go(source);
+        assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function && c.name == "greet"));
+        let func = chunks.iter().find(|c| c.name == "greet").unwrap();
+        assert!(func.content.contains("return"));
+    }
+
+    #[test]
+    fn extracts_method_declaration() {
+        let source = "package main\n\ntype Point struct {\n\tX float64\n\tY float64\n}\n\nfunc (p Point) Distance() float64 {\n\treturn p.X + p.Y\n}";
+        let chunks = chunk_go(source);
+        let method = chunks.iter().find(|c| c.name == "Distance");
+        assert!(method.is_some());
+        assert_eq!(method.unwrap().kind, ChunkKind::Method);
+        // Method receiver is included in the chunk content
+        assert!(method.unwrap().content.contains("(p Point)"));
+    }
+
+    #[test]
+    fn extracts_type_declaration_struct() {
+        let source = "package main\n\ntype Config struct {\n\tHost string\n\tPort int\n}";
+        let chunks = chunk_go(source);
+        let typ = chunks.iter().find(|c| c.name == "Config");
+        assert!(typ.is_some());
+        assert_eq!(typ.unwrap().kind, ChunkKind::Type);
+        assert!(typ.unwrap().content.contains("Host string"));
+    }
+
+    #[test]
+    fn extracts_type_declaration_interface() {
+        let source = "package main\n\ntype Reader interface {\n\tRead(p []byte) (int, error)\n}";
+        let chunks = chunk_go(source);
+        let typ = chunks.iter().find(|c| c.name == "Reader");
+        assert!(typ.is_some());
+        assert_eq!(typ.unwrap().kind, ChunkKind::Type);
+        assert!(typ.unwrap().content.contains("Read(p []byte)"));
+    }
+
+    #[test]
+    fn extracts_const_declaration() {
+        let source = "package main\n\nconst MaxSize = 1024";
+        let chunks = chunk_go(source);
+        let constant = chunks.iter().find(|c| c.name == "MaxSize");
+        assert!(constant.is_some());
+        assert_eq!(constant.unwrap().kind, ChunkKind::Other);
+    }
+
+    #[test]
+    fn extracts_var_declaration() {
+        let source = "package main\n\nvar Version = \"1.0.0\"";
+        let chunks = chunk_go(source);
+        let var = chunks.iter().find(|c| c.name == "Version");
+        assert!(var.is_some());
+        assert_eq!(var.unwrap().kind, ChunkKind::Other);
+    }
+
+    #[test]
+    fn module_level_code_captured() {
+        let source = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}";
+        let chunks = chunk_go(source);
+        let module = chunks.iter().find(|c| c.kind == ChunkKind::Module);
+        assert!(module.is_some());
+        assert!(module.unwrap().content.contains("package main") || module.unwrap().content.contains("import"));
+        let func = chunks.iter().find(|c| c.name == "main");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().kind, ChunkKind::Function);
+    }
+
+    #[test]
+    fn signature_extraction() {
+        let source = "package main\n\nfunc add(a int, b int) int {\n\treturn a + b\n}";
+        let chunks = chunk_go(source);
+        let func = chunks.iter().find(|c| c.name == "add").unwrap();
+        assert_eq!(
+            func.signature,
+            Some("func add(a int, b int) int".to_string())
+        );
+    }
+
+    #[test]
+    fn method_receiver_in_signature() {
+        let source = "package main\n\ntype Foo struct{}\n\nfunc (f *Foo) Bar() string {\n\treturn \"bar\"\n}";
+        let chunks = chunk_go(source);
+        let method = chunks.iter().find(|c| c.name == "Bar").unwrap();
+        let sig = method.signature.as_ref().unwrap();
+        assert!(sig.contains("(f *Foo)"));
+    }
+
+    #[test]
+    fn mixed_declarations() {
+        let source = r#"package main
+
+import "fmt"
+
+const Version = "1.0"
+
+type Config struct {
+	Host string
+}
+
+func NewConfig() *Config {
+	return &Config{Host: "localhost"}
+}
+
+func (c *Config) Print() {
+	fmt.Println(c.Host)
+}
+"#;
+        let chunks = chunk_go(source);
+        // Module (package + import), const, type, function, method
+        let has_module = chunks.iter().any(|c| c.kind == ChunkKind::Module);
+        let has_const = chunks.iter().any(|c| c.name == "Version" && c.kind == ChunkKind::Other);
+        let has_type = chunks.iter().any(|c| c.name == "Config" && c.kind == ChunkKind::Type);
+        let has_func = chunks.iter().any(|c| c.name == "NewConfig" && c.kind == ChunkKind::Function);
+        let has_method = chunks.iter().any(|c| c.name == "Print" && c.kind == ChunkKind::Method);
+        assert!(has_module, "should have module-level code");
+        assert!(has_const, "should have const");
+        assert!(has_type, "should have type");
+        assert!(has_func, "should have function");
+        assert!(has_method, "should have method");
+    }
+
+    #[test]
+    fn empty_go_source() {
+        let chunks = chunk_go("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunks_do_not_overlap() {
+        let source = "package main\n\nimport \"fmt\"\n\nfunc a() { fmt.Println(1) }\n\nvar x = 2\n\nfunc b() { fmt.Println(3) }";
+        let chunks = chunk_go(source);
+        for i in 0..chunks.len() {
+            for j in (i + 1)..chunks.len() {
+                assert!(
+                    chunks[i].end_line <= chunks[j].start_line
+                        || chunks[j].end_line <= chunks[i].start_line,
+                    "Chunks {} and {} overlap: [{}-{}] vs [{}-{}]",
+                    chunks[i].name,
+                    chunks[j].name,
+                    chunks[i].start_line,
+                    chunks[i].end_line,
+                    chunks[j].start_line,
+                    chunks[j].end_line,
+                );
+            }
+        }
     }
 }
