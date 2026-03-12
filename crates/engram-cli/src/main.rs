@@ -287,6 +287,34 @@ async fn main() {
 
             let provider = provider::OllamaProvider::from_config(&config.embedding);
 
+            // Detect provider/model mismatch against manifest
+            let mismatch_reason = {
+                let manifest = read_manifest(&path).ok().flatten();
+                if let Some(ref m) = manifest {
+                    let configured_model = &config.embedding.model;
+                    let configured_dims = config.embedding.dimensions as usize;
+                    if m.model_name != *configured_model {
+                        let msg = format!(
+                            "Embedding model mismatch: configured '{}' but store indexed with '{}'",
+                            configured_model, m.model_name
+                        );
+                        eprintln!("engram: WARNING — {msg}");
+                        Some(msg)
+                    } else if m.dimensions != configured_dims {
+                        let msg = format!(
+                            "Embedding dimensions mismatch: configured {} but store indexed with {}",
+                            configured_dims, m.dimensions
+                        );
+                        eprintln!("engram: WARNING — {msg}");
+                        Some(msg)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
             // Build source_roots from config sources
             let source_roots: HashMap<String, PathBuf> = config
                 .sources
@@ -369,7 +397,7 @@ async fn main() {
 
             let mut server =
                 McpServer::with_engine_and_sources(search, Box::new(provider), source_roots);
-            server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status);
+            server.set_boot_info(boot_ms as u64, path.to_string_lossy().to_string(), cache_status, mismatch_reason);
             server.set_graph(graph);
             server.set_context(Context::from_name(&context));
 

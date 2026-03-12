@@ -413,6 +413,9 @@ pub struct EngineState {
     benchmark: BenchmarkHarness,
     /// Currently active benchmark session (if any).
     active_benchmark: Mutex<Option<ActiveBenchmark>>,
+    /// If set, the configured embedding provider/model doesn't match the manifest.
+    /// Search operations are blocked until a full reindex resolves the mismatch.
+    pub mismatch_reason: Option<String>,
 }
 
 /// MCP server that communicates over stdio using JSON-RPC 2.0.
@@ -452,6 +455,7 @@ impl McpServer {
                 custom_definitions: CustomDefinitions::default(),
                 benchmark: BenchmarkHarness::default(),
                 active_benchmark: Mutex::new(None),
+                mismatch_reason: None,
             }),
             context: Context::Default,
         }
@@ -477,6 +481,7 @@ impl McpServer {
                 custom_definitions: CustomDefinitions::default(),
                 benchmark: BenchmarkHarness::default(),
                 active_benchmark: Mutex::new(None),
+                mismatch_reason: None,
             }),
             context: Context::Default,
         }
@@ -501,13 +506,20 @@ impl McpServer {
         }
     }
 
-    /// Set boot info on the engine state (boot timing, store path, cache status).
-    pub fn set_boot_info(&mut self, boot_time_ms: u64, store_path: String, cache_status: String) {
+    /// Set boot info on the engine state (boot timing, store path, cache status, optional mismatch).
+    pub fn set_boot_info(
+        &mut self,
+        boot_time_ms: u64,
+        store_path: String,
+        cache_status: String,
+        mismatch_reason: Option<String>,
+    ) {
         if let Some(ref mut state) = self.state {
             state.boot_time_ms = boot_time_ms;
             state.benchmark = BenchmarkHarness::new(PathBuf::from(&store_path));
             state.store_path = store_path;
             state.cache_status = cache_status;
+            state.mismatch_reason = mismatch_reason;
         }
     }
 
@@ -724,6 +736,14 @@ async fn handle_engram_search(
         if ab.mode == BenchmarkMode::Baseline {
             return tool_error_response(request, "Search is disabled in baseline benchmark mode");
         }
+    }
+
+    // Block search if embedding provider/model mismatch was detected on boot
+    if let Some(ref reason) = state.mismatch_reason {
+        return tool_error_response(
+            request,
+            &format!("Search blocked: {reason}. Run 'engram reindex --full' to resolve."),
+        );
     }
 
     let args = request
@@ -988,6 +1008,14 @@ async fn handle_engram_lookup(
         None => return tool_error_response(request, "Search engine not initialized"),
     };
 
+    // Block lookup if embedding provider/model mismatch was detected on boot
+    if let Some(ref reason) = state.mismatch_reason {
+        return tool_error_response(
+            request,
+            &format!("Lookup blocked: {reason}. Run 'engram reindex --full' to resolve."),
+        );
+    }
+
     let args = request
         .params
         .as_ref()
@@ -1109,6 +1137,7 @@ async fn handle_engram_status(
         "boot_time_ms": state.boot_time_ms,
         "embedding_provider": state.provider.name(),
         "store_path": state.store_path,
+        "provider_mismatch": state.mismatch_reason,
     });
 
     JsonRpcResponse::success(
@@ -2207,6 +2236,14 @@ async fn handle_engram_related(
         Some(s) => s,
         None => return tool_error_response(request, "Search engine not initialized"),
     };
+
+    // Block related search if embedding provider/model mismatch was detected on boot
+    if let Some(ref reason) = state.mismatch_reason {
+        return tool_error_response(
+            request,
+            &format!("Related search blocked: {reason}. Run 'engram reindex --full' to resolve."),
+        );
+    }
 
     let args = request
         .params
@@ -3911,7 +3948,7 @@ mod tests {
     ) -> Vec<JsonRpcResponse> {
         let (search, provider) = build_test_engine();
         let mut server = McpServer::with_engine(search, provider);
-        server.set_boot_info(0, store_path.to_string(), "none".to_string());
+        server.set_boot_info(0, store_path.to_string(), "none".to_string(), None);
         let reader = tokio::io::BufReader::new(input.as_bytes());
         let mut output = Vec::new();
         server.run(reader, &mut output).await.unwrap();
@@ -4932,7 +4969,7 @@ mod tests {
         let mut source_roots = HashMap::new();
         source_roots.insert("test-repo".to_string(), repo_dir.path().to_path_buf());
         let mut server = McpServer::with_engine_and_sources(search, provider, source_roots);
-        server.set_boot_info(0, store_dir.path().to_string_lossy().to_string(), "none".to_string());
+        server.set_boot_info(0, store_dir.path().to_string_lossy().to_string(), "none".to_string(), None);
 
         let input = make_request(
             1,
@@ -6327,5 +6364,122 @@ search:
         let text = result["content"][0]["text"].as_str().unwrap();
         let data: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(data["context"], "my-ctx");
+    }
+
+    // --- Provider mismatch detection tests ---
+
+    async fn run_server_with_mismatch(input: &str) -> Vec<JsonRpcResponse> {
+        let (search, provider) = build_test_engine();
+        let mut server = McpServer::with_engine(search, provider);
+        server.set_boot_info(
+            100,
+            "/tmp/test-store".to_string(),
+            "hit".to_string(),
+            Some("Embedding model mismatch: configured 'text-embedding-3-small' but store indexed with 'nomic-embed-text'".to_string()),
+        );
+        let reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut output = Vec::new();
+        server.run(reader, &mut output).await.unwrap();
+        let output_str = String::from_utf8(output).unwrap();
+        output_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_blocks_search() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "test"}})),
+        );
+        let responses = run_server_with_mismatch(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Search blocked"));
+        assert!(text.contains("model mismatch"));
+        assert!(text.contains("engram reindex --full"));
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_blocks_lookup() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_lookup", "arguments": {"identifier": "test_fn"}})),
+        );
+        let responses = run_server_with_mismatch(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Lookup blocked"));
+        assert!(text.contains("engram reindex --full"));
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_blocks_related() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_related", "arguments": {"chunk_id": "test#a#b"}})),
+        );
+        let responses = run_server_with_mismatch(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Related search blocked"));
+        assert!(text.contains("engram reindex --full"));
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_reported_in_status() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_mismatch(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(data["provider_mismatch"].is_string());
+        assert!(data["provider_mismatch"].as_str().unwrap().contains("model mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_no_mismatch_allows_search() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_search", "arguments": {"query": "calculate"}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        // Should not be an error (search proceeds normally)
+        assert_eq!(result["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn test_no_mismatch_status_null() {
+        let input = make_request(
+            1,
+            "tools/call",
+            Some(json!({"name": "engram_status", "arguments": {}})),
+        );
+        let responses = run_server_with_engine(&input).await;
+        assert_eq!(responses.len(), 1);
+        let result = responses[0].result.as_ref().unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(data["provider_mismatch"].is_null());
     }
 }
