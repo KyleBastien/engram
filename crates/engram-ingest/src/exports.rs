@@ -27,6 +27,7 @@ impl TreeSitterExportExtractor {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::Go => tree_sitter_go::LANGUAGE.into(),
+            Language::Java => tree_sitter_java::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -43,6 +44,7 @@ impl TreeSitterExportExtractor {
             Language::Rust => self.extract_rust_exports(&root, source, file),
             Language::Python => self.extract_python_exports(&root, source, file),
             Language::Go => vec![], // Go export extraction not yet implemented
+            Language::Java => vec![], // Java export extraction not yet implemented
         }
     }
 

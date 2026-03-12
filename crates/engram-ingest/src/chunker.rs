@@ -20,6 +20,7 @@ pub enum Language {
     Rust,
     Python,
     Go,
+    Java,
 }
 
 /// Extracts semantic chunks from source code using tree-sitter AST parsing.
@@ -38,6 +39,7 @@ impl TreeSitterChunker {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::Go => tree_sitter_go::LANGUAGE.into(),
+            Language::Java => tree_sitter_java::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -61,6 +63,7 @@ impl TreeSitterChunker {
                 Language::Rust => self.extract_rust_node(&child, source),
                 Language::Python => self.extract_python_node(&child, source),
                 Language::Go => self.extract_go_node(&child, source),
+                Language::Java => self.extract_java_node(&child, source),
             };
             if let Some(chunk) = extracted {
                 // Flush accumulated module content before this declaration
@@ -303,6 +306,28 @@ impl TreeSitterChunker {
                     }
                 }
                 None
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_java_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
+        match node.kind() {
+            "class_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Class, name, node, source))
+            }
+            "interface_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "enum_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "annotation_type_declaration" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
             }
             _ => None,
         }
@@ -1061,6 +1086,165 @@ func (c *Config) Print() {
     fn chunks_do_not_overlap() {
         let source = "package main\n\nimport \"fmt\"\n\nfunc a() { fmt.Println(1) }\n\nvar x = 2\n\nfunc b() { fmt.Println(3) }";
         let chunks = chunk_go(source);
+        for i in 0..chunks.len() {
+            for j in (i + 1)..chunks.len() {
+                assert!(
+                    chunks[i].end_line <= chunks[j].start_line
+                        || chunks[j].end_line <= chunks[i].start_line,
+                    "Chunks {} and {} overlap: [{}-{}] vs [{}-{}]",
+                    chunks[i].name,
+                    chunks[j].name,
+                    chunks[i].start_line,
+                    chunks[i].end_line,
+                    chunks[j].start_line,
+                    chunks[j].end_line,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod java_tests {
+    use super::*;
+
+    fn chunk_java(source: &str) -> Vec<RawChunk> {
+        let chunker = TreeSitterChunker::new();
+        chunker.chunk_file(Path::new("Test.java"), source, Language::Java)
+    }
+
+    #[test]
+    fn extracts_class_declaration() {
+        let source = "public class Calculator {\n    public int add(int a, int b) {\n        return a + b;\n    }\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "Calculator");
+        assert!(chunks[0].content.contains("add"));
+    }
+
+    #[test]
+    fn extracts_method_in_class() {
+        let source = "public class Service {\n    public String process(String input) {\n        return input.toUpperCase();\n    }\n\n    private void helper() {\n        // internal\n    }\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert!(chunks[0].content.contains("process"));
+        assert!(chunks[0].content.contains("helper"));
+    }
+
+    #[test]
+    fn extracts_interface_declaration() {
+        let source = "public interface Shape {\n    double area();\n    double perimeter();\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Type);
+        assert_eq!(chunks[0].name, "Shape");
+        assert!(chunks[0].content.contains("area"));
+    }
+
+    #[test]
+    fn extracts_enum_declaration() {
+        let source = "public enum Color {\n    RED,\n    GREEN,\n    BLUE\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Type);
+        assert_eq!(chunks[0].name, "Color");
+    }
+
+    #[test]
+    fn extracts_constructor_in_class() {
+        let source = "public class Point {\n    private int x;\n    private int y;\n\n    public Point(int x, int y) {\n        this.x = x;\n        this.y = y;\n    }\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "Point");
+        assert!(chunks[0].content.contains("Point(int x, int y)"));
+    }
+
+    #[test]
+    fn annotations_included_with_declaration() {
+        let source = "@Entity\n@Table(name = \"users\")\npublic class User {\n    @Id\n    private Long id;\n    private String name;\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "User");
+        assert!(chunks[0].content.contains("@Entity"));
+        assert!(chunks[0].content.contains("@Table"));
+    }
+
+    #[test]
+    fn inner_class_part_of_outer() {
+        let source = "public class Outer {\n    public class Inner {\n        public void innerMethod() {}\n    }\n    public void outerMethod() {}\n}";
+        let chunks = chunk_java(source);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Class);
+        assert_eq!(chunks[0].name, "Outer");
+        assert!(chunks[0].content.contains("Inner"));
+        assert!(chunks[0].content.contains("innerMethod"));
+    }
+
+    #[test]
+    fn signature_extraction() {
+        let source = "public class Calculator {\n    public int add(int a, int b) {\n        return a + b;\n    }\n}";
+        let chunks = chunk_java(source);
+        let sig = chunks[0].signature.as_ref().unwrap();
+        assert!(sig.contains("public class Calculator"));
+    }
+
+    #[test]
+    fn module_level_code_captured() {
+        let source = "package com.example;\n\nimport java.util.List;\n\npublic class App {\n    public void run() {}\n}";
+        let chunks = chunk_java(source);
+        let module = chunks.iter().find(|c| c.kind == ChunkKind::Module);
+        assert!(module.is_some());
+        let module = module.unwrap();
+        assert!(module.content.contains("package") || module.content.contains("import"));
+        let class = chunks.iter().find(|c| c.name == "App");
+        assert!(class.is_some());
+    }
+
+    #[test]
+    fn mixed_declarations() {
+        let source = r#"package com.example;
+
+import java.util.List;
+
+public interface Describable {
+    String describe();
+}
+
+public class Item implements Describable {
+    public String describe() {
+        return "item";
+    }
+}
+
+public enum Status {
+    ACTIVE,
+    INACTIVE
+}"#;
+        let chunks = chunk_java(source);
+        let has_module = chunks.iter().any(|c| c.kind == ChunkKind::Module);
+        let has_interface = chunks.iter().any(|c| c.name == "Describable" && c.kind == ChunkKind::Type);
+        let has_class = chunks.iter().any(|c| c.name == "Item" && c.kind == ChunkKind::Class);
+        let has_enum = chunks.iter().any(|c| c.name == "Status" && c.kind == ChunkKind::Type);
+        assert!(has_module, "should have module-level code");
+        assert!(has_interface, "should have interface");
+        assert!(has_class, "should have class");
+        assert!(has_enum, "should have enum");
+    }
+
+    #[test]
+    fn empty_java_source() {
+        let chunks = chunk_java("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunks_do_not_overlap() {
+        let source = "package com.example;\n\nimport java.util.*;\n\npublic class A { void m() {} }\n\npublic class B { void n() {} }";
+        let chunks = chunk_java(source);
         for i in 0..chunks.len() {
             for j in (i + 1)..chunks.len() {
                 assert!(

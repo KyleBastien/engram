@@ -24,6 +24,7 @@ pub fn extract_key_abstractions(
         "typescript" | "javascript" => Some(Language::TypeScript),
         "python" => Some(Language::Python),
         "go" | "golang" => Some(Language::Go),
+        "java" => Some(Language::Java),
         _ => None,
     };
 
@@ -194,6 +195,7 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
         Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Java => tree_sitter_java::LANGUAGE.into(),
     };
     parser
         .set_language(&ts_language)
@@ -219,6 +221,9 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
             }
             Language::Go => {
                 extract_go_declarations(&child, source, rel_path, &mut declarations);
+            }
+            Language::Java => {
+                extract_java_declarations(&child, source, rel_path, &mut declarations);
             }
         }
     }
@@ -449,6 +454,38 @@ fn extract_go_declarations(
     }
 }
 
+fn extract_java_declarations(
+    node: &Node,
+    source: &str,
+    file: &str,
+    decls: &mut Vec<RawDeclaration>,
+) {
+    match node.kind() {
+        "class_declaration" | "interface_declaration" | "enum_declaration" => {
+            if let Some(name) = field_text(node, "name", source) {
+                let kind = match node.kind() {
+                    "class_declaration" => "class",
+                    "interface_declaration" => "interface",
+                    "enum_declaration" => "enum",
+                    _ => "type",
+                };
+                // Java top-level public classes are exported
+                let text = &source[node.start_byte()..node.end_byte()];
+                let is_exported = text.contains("public ");
+                let description = extract_doc_comment(node, source);
+                decls.push(RawDeclaration {
+                    name,
+                    kind: kind.to_string(),
+                    file: file.to_string(),
+                    description,
+                    is_exported,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 fn field_text(node: &Node, field: &str, source: &str) -> Option<String> {
     let child = node.child_by_field_name(field)?;
     Some(source[child.start_byte()..child.end_byte()].to_string())
@@ -643,6 +680,26 @@ pub(crate) fn detect_patterns(abstractions: &[Abstraction], language: &str) -> V
                         name: "Struct-based modeling".to_string(),
                         description: "Uses structs for data modeling".to_string(),
                         examples: structs.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+        }
+        "java" => {
+            if let Some(interfaces) = kind_counts.get("interface") {
+                if interfaces.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Interface-driven design".to_string(),
+                        description: "Uses interfaces to define type contracts".to_string(),
+                        examples: interfaces.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+            if let Some(classes) = kind_counts.get("class") {
+                if classes.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Class-based architecture".to_string(),
+                        description: "Uses classes for encapsulation and organization".to_string(),
+                        examples: classes.iter().take(3).map(|s| s.to_string()).collect(),
                     });
                 }
             }

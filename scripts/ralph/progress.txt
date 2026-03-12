@@ -2,6 +2,9 @@
 Started: 03/09/2026 17:15:47
 
 ## Codebase Patterns
+- tree-sitter-go v0.23 exports `LANGUAGE` (same as tree-sitter-rust/python); Go type_declaration nests type_spec, const_declaration nests const_spec, var_declaration nests var_spec
+- tree-sitter-java v0.23 exports `LANGUAGE` (same pattern); Java class_declaration includes annotations in its range; inner classes are part of outer class_declaration node
+- Adding a new Language variant requires match arms in: chunker.rs, imports.rs, exports.rs, abstractions.rs, detect.rs (5 files)
 - notify v7 for cross-platform file watching; `RecommendedWatcher::new()` takes a closure + `Config::default()`; use `tokio::sync::mpsc::unbounded_channel` to bridge sync callback to async
 - Clippy enforces `std::io::Error::other()` over `std::io::Error::new(ErrorKind::Other, ...)` — `io_other_error` lint
 - ort 2.0.0-rc.12 API paths: `ort::session::Session`, `ort::session::builder::GraphOptimizationLevel`, `ort::ep::CUDA`; Session::run needs `&mut self` (use Mutex)
@@ -1902,4 +1905,40 @@ Started: 03/09/2026 17:15:47
   - tokio::signal::ctrl_c() requires the "signal" feature on tokio
   - Use `tokio::select!` to wrap run_watch_loop + ctrl_c for graceful foreground shutdown; for serve integration, just spawn the watch loop as a background task
   - `path.to_path_buf()` (not `path.clone()`) when path is `&Path` and you need a PathBuf for Debouncer::record
+---
+
+## 2026-03-11 - US-109
+- Implemented tree-sitter chunking for Go language
+- Added `Go` variant to `Language` enum
+- Added `tree-sitter-go = "0.23"` dependency to engram-ingest
+- Implemented `extract_go_node` method handling: function_declaration, method_declaration, type_declaration (struct/interface), const_declaration, var_declaration
+- Added `Language::Go` match arms in imports.rs, exports.rs, abstractions.rs (stubs for now)
+- Added Go abstraction extraction and pattern detection in abstractions.rs
+- Added 13 Go-specific tests in chunker.rs (all pass)
+- Files changed: Cargo.lock, crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/chunker.rs, crates/engram-ingest/src/imports.rs, crates/engram-ingest/src/exports.rs, crates/engram-ingest/src/abstractions.rs
+- **Learnings for future iterations:**
+  - tree-sitter-go v0.23 is compatible with tree-sitter 0.24; exports `LANGUAGE` (same pattern as tree-sitter-rust/python)
+  - Go type_declaration contains type_spec children (not direct name field); access name via type_spec child
+  - Go const_declaration contains const_spec children, var_declaration contains var_spec children — same nested pattern
+  - Go method_declaration has receiver field; full node text automatically includes "(r ReceiverType)" in content
+  - Adding a Language variant requires updating match statements in 5 files: chunker.rs, imports.rs, exports.rs, abstractions.rs, detect.rs
+  - detect.rs is separate story (US-112) — until Go is added there, collect_source_files won't pick up .go files
+---
+
+## 2026-03-11 - US-110
+- Implemented tree-sitter chunking for Java language
+- Added `Java` variant to Language enum in chunker.rs
+- Added `extract_java_node` method handling: class_declaration, interface_declaration, enum_declaration, annotation_type_declaration
+- Methods and constructors are included as part of class chunks (same pattern as all other languages)
+- Annotations are included with annotated declarations (tree-sitter-java includes them in the declaration node range)
+- Inner classes are chunked as part of outer class (not extracted separately)
+- Added Java stubs in imports.rs, exports.rs (returning empty vec), and Java declarations/patterns in abstractions.rs
+- Added 12 Java-specific tests in chunker.rs (all pass)
+- Files changed: Cargo.lock, crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/chunker.rs, crates/engram-ingest/src/imports.rs, crates/engram-ingest/src/exports.rs, crates/engram-ingest/src/abstractions.rs
+- **Learnings for future iterations:**
+  - tree-sitter-java v0.23 is compatible with tree-sitter 0.24; exports `LANGUAGE` (same pattern as other language crates)
+  - Java class_declaration node range includes preceding annotations — no special handling needed for `@Entity` etc.
+  - Java inner classes are nested inside the outer class_declaration node — they come for free in the chunk content
+  - Java top-level nodes: class_declaration, interface_declaration, enum_declaration, annotation_type_declaration; methods/constructors are inside class_body
+  - detect.rs update for .java is handled by US-112 (separate story)
 ---
