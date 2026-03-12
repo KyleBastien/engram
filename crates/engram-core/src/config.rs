@@ -256,6 +256,13 @@ impl Default for BenchmarkConfig {
 pub struct StorageConfig {
     pub compression: bool,
     pub snapshot_interval_commits: u32,
+    /// Embedding precision: "f32" (default) or "f16" for 50% storage reduction.
+    #[serde(default = "default_embedding_precision")]
+    pub embedding_precision: String,
+}
+
+fn default_embedding_precision() -> String {
+    "f32".to_string()
 }
 
 impl Default for StorageConfig {
@@ -263,6 +270,7 @@ impl Default for StorageConfig {
         Self {
             compression: true,
             snapshot_interval_commits: 50,
+            embedding_precision: "f32".to_string(),
         }
     }
 }

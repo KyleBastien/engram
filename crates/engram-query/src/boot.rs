@@ -529,7 +529,7 @@ fn write_cache(
 mod tests {
     use super::*;
     use engram_core::{ChunkKind, Manifest};
-    use engram_store::{write_chunks_jsonl, write_embeddings_bin, write_manifest};
+    use engram_store::{write_chunks_jsonl, write_embeddings_bin, write_manifest, PRECISION_F32};
     use tempfile::TempDir;
 
     fn make_chunk(id: &str, name: &str, offset: usize) -> ChunkMetadata {
@@ -567,7 +567,7 @@ mod tests {
         write_chunks_jsonl(&src_dir.join("lib.rs.chunks.jsonl"), &chunks).unwrap();
 
         let vectors = vec![make_vector(dims, 0.0), make_vector(dims, 1.0)];
-        write_embeddings_bin(&src_dir.join("lib.rs.embeddings.bin"), &vectors, dims).unwrap();
+        write_embeddings_bin(&src_dir.join("lib.rs.embeddings.bin"), &vectors, dims, PRECISION_F32).unwrap();
 
         let manifest = Manifest {
             chunk_count: 2,
@@ -681,6 +681,7 @@ mod tests {
             &src_dir.join("a.rs.embeddings.bin"),
             &[make_vector(dims, 0.0)],
             dims,
+            PRECISION_F32,
         )
         .unwrap();
 
@@ -694,6 +695,7 @@ mod tests {
             &src_dir.join("b.rs.embeddings.bin"),
             &[make_vector(dims, 1.0), make_vector(dims, 2.0)],
             dims,
+            PRECISION_F32,
         )
         .unwrap();
 

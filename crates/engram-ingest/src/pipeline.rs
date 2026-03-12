@@ -8,7 +8,7 @@ use engram_core::{
 };
 use engram_store::{
     chunks_path, commit_changes, embeddings_path, read_chunks_jsonl, read_embeddings_bin,
-    read_manifest, write_chunks_jsonl, write_embeddings_bin, write_manifest,
+    read_manifest, write_chunks_jsonl, write_embeddings_bin, write_manifest, PRECISION_F32,
 };
 use git2::Repository;
 
@@ -192,7 +192,7 @@ impl IngestPipeline {
                 write_chunks_jsonl(&cp, &metadata)?;
 
                 let ep = embeddings_path(store_root, &source.name, rel_path)?;
-                write_embeddings_bin(&ep, &vectors, dimensions)?;
+                write_embeddings_bin(&ep, &vectors, dimensions, PRECISION_F32)?;
             }
 
             // Handle deleted files

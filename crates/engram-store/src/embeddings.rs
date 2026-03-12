@@ -3,10 +3,14 @@ use std::io::Cursor;
 use std::path::Path;
 
 use engram_core::{EngramError, Result};
+use half::f16;
 
 const MAGIC: &[u8; 4] = b"EGRM";
 const VERSION: u16 = 1;
-const PRECISION_F32: u16 = 0;
+/// f32 precision (4 bytes per component).
+pub const PRECISION_F32: u16 = 0;
+/// f16 precision (2 bytes per component, ~50% storage reduction).
+pub const PRECISION_F16: u16 = 1;
 
 /// Parsed embedding file returned by [`read_embeddings_bin`].
 #[derive(Debug, Clone)]
@@ -15,37 +19,62 @@ pub struct EmbeddingFile {
     pub dimensions: usize,
     /// Number of vectors stored.
     pub count: usize,
-    /// Precision indicator (0 = f32).
+    /// Precision indicator (0 = f32, 1 = f16).
     pub precision: u16,
-    /// Flattened vector data (`count * dimensions` floats).
+    /// Flattened vector data (`count * dimensions` floats), always returned as f32.
     pub vectors: Vec<f32>,
 }
 
 /// Write embedding vectors in compact binary format.
 ///
-/// Format: 16-byte header followed by contiguous little-endian f32 values.
+/// Format: 16-byte header followed by contiguous little-endian values.
+/// When `precision` is [`PRECISION_F16`], f32 values are converted to f16 before writing.
 pub fn write_embeddings_bin(
     path: &Path,
     vectors: &[Vec<f32>],
     dimensions: usize,
+    precision: u16,
 ) -> Result<()> {
     let count = vectors.len() as u32;
     let dims = dimensions as u16;
+    let bytes_per_component: usize = match precision {
+        PRECISION_F32 => 4,
+        PRECISION_F16 => 2,
+        _ => {
+            return Err(EngramError::Store(format!(
+                "unsupported embedding precision: {precision}"
+            )))
+        }
+    };
 
     // Build header (16 bytes)
-    let mut buf: Vec<u8> = Vec::with_capacity(16 + vectors.len() * dimensions * 4);
+    let mut buf: Vec<u8> =
+        Vec::with_capacity(16 + vectors.len() * dimensions * bytes_per_component);
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&VERSION.to_le_bytes());
     buf.extend_from_slice(&dims.to_le_bytes());
     buf.extend_from_slice(&count.to_le_bytes());
-    buf.extend_from_slice(&PRECISION_F32.to_le_bytes());
+    buf.extend_from_slice(&precision.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes()); // reserved
 
     // Write vector data
-    for vec in vectors {
-        for &val in vec {
-            buf.extend_from_slice(&val.to_le_bytes());
+    match precision {
+        PRECISION_F32 => {
+            for vec in vectors {
+                for &val in vec {
+                    buf.extend_from_slice(&val.to_le_bytes());
+                }
+            }
         }
+        PRECISION_F16 => {
+            for vec in vectors {
+                for &val in vec {
+                    let half_val = f16::from_f32(val);
+                    buf.extend_from_slice(&half_val.to_le_bytes());
+                }
+            }
+        }
+        _ => unreachable!(),
     }
 
     fs::write(path, buf)?;
@@ -54,8 +83,9 @@ pub fn write_embeddings_bin(
 
 /// Read embedding vectors from the binary format.
 ///
-/// Validates magic bytes and version. Returns an [`EmbeddingFile`] with the
-/// parsed header fields and raw vector data.
+/// Validates magic bytes and version. When the file uses f16 precision,
+/// values are automatically converted back to f32. Returns an [`EmbeddingFile`]
+/// with the parsed header fields and f32 vector data.
 pub fn read_embeddings_bin(path: &Path) -> Result<EmbeddingFile> {
     let data = fs::read(path)?;
 
@@ -90,7 +120,17 @@ pub fn read_embeddings_bin(path: &Path) -> Result<EmbeddingFile> {
     let precision = read_u16(&data[12..14]);
     // bytes 14..16 are reserved
 
-    let expected_data_len = count * dimensions * 4;
+    let bytes_per_component: usize = match precision {
+        PRECISION_F32 => 4,
+        PRECISION_F16 => 2,
+        _ => {
+            return Err(EngramError::Store(format!(
+                "unsupported embedding precision in file: {precision}"
+            )))
+        }
+    };
+
+    let expected_data_len = count * dimensions * bytes_per_component;
     let actual_data_len = data.len() - 16;
     if actual_data_len < expected_data_len {
         return Err(EngramError::Store(format!(
@@ -98,11 +138,26 @@ pub fn read_embeddings_bin(path: &Path) -> Result<EmbeddingFile> {
         )));
     }
 
-    let mut vectors = Vec::with_capacity(count * dimensions);
     let vector_data = &data[16..];
-    for i in 0..(count * dimensions) {
-        let offset = i * 4;
-        vectors.push(read_f32(&vector_data[offset..offset + 4]));
+    let total_elements = count * dimensions;
+    let mut vectors = Vec::with_capacity(total_elements);
+
+    match precision {
+        PRECISION_F32 => {
+            for i in 0..total_elements {
+                let offset = i * 4;
+                vectors.push(read_f32(&vector_data[offset..offset + 4]));
+            }
+        }
+        PRECISION_F16 => {
+            for i in 0..total_elements {
+                let offset = i * 2;
+                let half_val =
+                    f16::from_le_bytes([vector_data[offset], vector_data[offset + 1]]);
+                vectors.push(half_val.to_f32());
+            }
+        }
+        _ => unreachable!(),
     }
 
     Ok(EmbeddingFile {
@@ -135,7 +190,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("empty.bin");
 
-        write_embeddings_bin(&path, &[], 3).unwrap();
+        write_embeddings_bin(&path, &[], 3, PRECISION_F32).unwrap();
         let result = read_embeddings_bin(&path).unwrap();
 
         assert_eq!(result.count, 0);
@@ -150,7 +205,7 @@ mod tests {
         let path = tmp.path().join("single.bin");
 
         let vectors = vec![vec![1.0f32, 2.0, 3.0]];
-        write_embeddings_bin(&path, &vectors, 3).unwrap();
+        write_embeddings_bin(&path, &vectors, 3, PRECISION_F32).unwrap();
         let result = read_embeddings_bin(&path).unwrap();
 
         assert_eq!(result.count, 1);
@@ -168,7 +223,7 @@ mod tests {
             .map(|i| (0..dims).map(|d| (i * dims + d) as f32 * 0.001).collect())
             .collect();
 
-        write_embeddings_bin(&path, &vectors, dims).unwrap();
+        write_embeddings_bin(&path, &vectors, dims, PRECISION_F32).unwrap();
         let result = read_embeddings_bin(&path).unwrap();
 
         assert_eq!(result.count, 100);
@@ -215,7 +270,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("header.bin");
 
-        write_embeddings_bin(&path, &[], 4).unwrap();
+        write_embeddings_bin(&path, &[], 4, PRECISION_F32).unwrap();
         let data = fs::read(&path).unwrap();
 
         assert_eq!(data.len(), 16);
@@ -226,5 +281,133 @@ mod tests {
         assert_eq!(read_u32(&data[8..12]), 0); // count
         assert_eq!(read_u16(&data[12..14]), PRECISION_F32);
         assert_eq!(read_u16(&data[14..16]), 0); // reserved
+    }
+
+    #[test]
+    fn f16_round_trip_single_vector() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f16_single.bin");
+
+        let vectors = vec![vec![1.0f32, 2.0, 3.0]];
+        write_embeddings_bin(&path, &vectors, 3, PRECISION_F16).unwrap();
+        let result = read_embeddings_bin(&path).unwrap();
+
+        assert_eq!(result.count, 1);
+        assert_eq!(result.dimensions, 3);
+        assert_eq!(result.precision, PRECISION_F16);
+        // f16 can represent small integers exactly
+        assert_eq!(result.vectors, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn f16_round_trip_accuracy() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f16_accuracy.bin");
+
+        let dims = 768;
+        let vectors: Vec<Vec<f32>> = (0..100)
+            .map(|i| {
+                (0..dims)
+                    .map(|d| (i * dims + d) as f32 * 0.001)
+                    .collect()
+            })
+            .collect();
+
+        write_embeddings_bin(&path, &vectors, dims, PRECISION_F16).unwrap();
+        let result = read_embeddings_bin(&path).unwrap();
+
+        assert_eq!(result.count, 100);
+        assert_eq!(result.dimensions, dims);
+        assert_eq!(result.precision, PRECISION_F16);
+
+        // Verify accuracy: < 0.1% relative error for non-zero values
+        for (i, vec) in vectors.iter().enumerate() {
+            for (d, &original) in vec.iter().enumerate() {
+                let recovered = result.vectors[i * dims + d];
+                if original.abs() < 1e-10 {
+                    // For near-zero values, check absolute error
+                    assert!(
+                        (recovered - original).abs() < 1e-3,
+                        "absolute error too large at [{i}][{d}]: original={original}, recovered={recovered}"
+                    );
+                } else {
+                    let relative_error = ((recovered - original) / original).abs();
+                    assert!(
+                        relative_error < 0.001,
+                        "relative error {relative_error:.6} >= 0.1% at [{i}][{d}]: original={original}, recovered={recovered}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn f16_storage_is_half_size() {
+        let tmp = TempDir::new().unwrap();
+        let path_f32 = tmp.path().join("f32.bin");
+        let path_f16 = tmp.path().join("f16.bin");
+
+        let dims = 768;
+        let vectors: Vec<Vec<f32>> = (0..10)
+            .map(|i| (0..dims).map(|d| (i * dims + d) as f32 * 0.001).collect())
+            .collect();
+
+        write_embeddings_bin(&path_f32, &vectors, dims, PRECISION_F32).unwrap();
+        write_embeddings_bin(&path_f16, &vectors, dims, PRECISION_F16).unwrap();
+
+        let size_f32 = fs::metadata(&path_f32).unwrap().len();
+        let size_f16 = fs::metadata(&path_f16).unwrap().len();
+
+        // f16 data should be about half the f32 data size (both have same 16-byte header)
+        let data_f32 = size_f32 - 16;
+        let data_f16 = size_f16 - 16;
+        assert_eq!(data_f16, data_f32 / 2);
+    }
+
+    #[test]
+    fn f16_header_has_correct_precision() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f16_header.bin");
+
+        write_embeddings_bin(&path, &[], 4, PRECISION_F16).unwrap();
+        let data = fs::read(&path).unwrap();
+
+        assert_eq!(data.len(), 16);
+        assert_eq!(read_u16(&data[12..14]), PRECISION_F16);
+    }
+
+    #[test]
+    fn unsupported_precision_write_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bad_prec.bin");
+
+        let err = write_embeddings_bin(&path, &[], 4, 99).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported embedding precision"),
+            "error was: {msg}"
+        );
+    }
+
+    #[test]
+    fn unsupported_precision_read_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bad_prec_read.bin");
+
+        // Write a valid header but with unsupported precision
+        let mut data = vec![0u8; 16];
+        data[0..4].copy_from_slice(MAGIC);
+        data[4..6].copy_from_slice(&VERSION.to_le_bytes());
+        data[6..8].copy_from_slice(&4u16.to_le_bytes()); // dims
+        data[8..12].copy_from_slice(&0u32.to_le_bytes()); // count
+        data[12..14].copy_from_slice(&99u16.to_le_bytes()); // bad precision
+        fs::write(&path, data).unwrap();
+
+        let err = read_embeddings_bin(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported embedding precision"),
+            "error was: {msg}"
+        );
     }
 }

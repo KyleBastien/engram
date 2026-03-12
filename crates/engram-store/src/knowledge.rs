@@ -110,7 +110,7 @@ pub fn write_knowledge_embedding(
     dimensions: usize,
 ) -> Result<PathBuf> {
     let emb_path = knowledge_embedding_path(yaml_path);
-    write_embeddings_bin(&emb_path, &[embedding.to_vec()], dimensions)?;
+    write_embeddings_bin(&emb_path, &[embedding.to_vec()], dimensions, crate::PRECISION_F32)?;
     Ok(emb_path)
 }
 
