@@ -1966,3 +1966,14 @@ Started: 03/09/2026 17:15:47
   - Both tree-sitter-c and tree-sitter-cpp export `LANGUAGE` (same pattern as Go/Java/Rust/Python)
   - `enum class` (C++ scoped enums) are parsed as `enum_specifier` with a `name` field — same extraction works for both C and C++
 ---
+
+## 2026-03-11 - US-112
+- Added Go (.go) and Java (.java) extension mappings to `detect_language()` in detect.rs
+- C (.c, .h) and C++ (.cpp, .cc, .cxx, .hpp) were already implemented in US-111
+- Added unit tests for Go and Java detection
+- All 44 detect module tests pass, clippy clean
+- Files changed: crates/engram-ingest/src/detect.rs
+- **Learnings for future iterations:**
+  - C/C++ detection was already added as part of US-111 (tree-sitter chunking story), so US-112 only needed Go and Java additions
+  - When stories overlap in scope, check what was already implemented before starting
+---
