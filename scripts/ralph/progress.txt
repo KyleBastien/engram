@@ -1814,3 +1814,18 @@ Started: 03/09/2026 17:15:47
   - `ReferenceClientCapabilities` is an alias for `DynamicRegistrationClientCapabilities`, not `GotoCapability`
   - `SymbolInformation.deprecated` field is deprecated — use `#[allow(deprecated)]` in tests that construct it
 ---
+
+## 2026-03-11 - US-104
+- Implemented auto-install for language servers in engram-lsp
+- Added `install.rs` module with `command_exists()`, `install_spec_for()`, and `try_install()` functions
+- Added `LspResolutionConfig` with `auto_install: bool` to engram-core config
+- Updated `ServerManager` to check PATH before starting servers and auto-install when enabled
+- Added `with_auto_install()` constructors to ServerManager and LspSymbolResolver
+- If install fails or server not found, gracefully falls back to tree-sitter (returns `Ok(None)`)
+- Files changed: crates/engram-core/src/config.rs, crates/engram-core/src/lib.rs, crates/engram-lsp/src/install.rs, crates/engram-lsp/src/lib.rs, crates/engram-lsp/src/manager.rs, crates/engram-lsp/src/resolver.rs
+- **Learnings for future iterations:**
+  - Clippy `derivable_impls` lint: if all fields use their type's Default, use `#[derive(Default)]` instead of manual `impl Default`
+  - `install_spec_for()` returns install commands per server; rust-analyzer is special-cased (check-only, no auto-install command)
+  - `command_exists()` uses `which` to check PATH availability; works on macOS/Linux
+  - ServerManager.ensure_server() now returns Ok(None) when server not found (graceful fallback) instead of Err
+---
