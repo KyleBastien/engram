@@ -2,6 +2,8 @@
 Started: 03/09/2026 17:15:47
 
 ## Codebase Patterns
+- notify v7 for cross-platform file watching; `RecommendedWatcher::new()` takes a closure + `Config::default()`; use `tokio::sync::mpsc::unbounded_channel` to bridge sync callback to async
+- Clippy enforces `std::io::Error::other()` over `std::io::Error::new(ErrorKind::Other, ...)` — `io_other_error` lint
 - ort 2.0.0-rc.12 API paths: `ort::session::Session`, `ort::session::builder::GraphOptimizationLevel`, `ort::ep::CUDA`; Session::run needs `&mut self` (use Mutex)
 - ort uses ndarray 0.17; use `TensorRef::from_array_view()` for inputs, `try_extract_array::<f32>()` for outputs
 - tokenizers crate needs `fancy-regex` feature when using `default-features = false`
@@ -1866,4 +1868,22 @@ Started: 03/09/2026 17:15:47
   - `Commands` enum pattern for subcommands with actions: use `Hooks { #[command(subcommand)] action: HooksAction }`
   - When adding fields to enum variants (like `hooks` to `Init`), update ALL pattern matches in tests using `..` for forward compat
   - `#[cfg(unix)]` block for `set_permissions` to set executable mode
+---
+
+## 2026-03-11 - US-107
+- Implemented engram-watch crate for real-time file watching and re-indexing
+- FileWatcher: watches configured source directories, matches paths to sources with include/exclude/ignore filtering
+- Debouncer: collects file change events and drains ready paths after configurable quiet period
+- reindex_file: re-chunks and re-embeds individual files, writes to store WITHOUT git commit
+- create_watcher: thin wrapper around notify::RecommendedWatcher with mpsc channel bridge
+- Added `ignore: Vec<String>` field to WatcherConfig in engram-core for watcher-level ignore patterns
+- Updated WatcherConfig default debounce_ms from 500 to 2000 per acceptance criteria
+- 19 tests covering: debouncer timing/dedup, path matching with ignore/include/exclude, reindex with mock provider, no-commit verification
+- Files changed: Cargo.toml, crates/engram-core/src/config.rs, crates/engram-watch/Cargo.toml, crates/engram-watch/project.json, crates/engram-watch/src/lib.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - notify v7 uses `RecommendedWatcher::new(callback, Config::default())` pattern; callback is sync so bridge to async with mpsc channel
+  - Clippy enforces `std::io::Error::other()` instead of `std::io::Error::new(ErrorKind::Other, ...)` — `io_other_error` lint
+  - canonicalize() paths in FileWatcher to handle symlinks; fall back to original path if canonicalize fails
+  - chunk_source is private in pipeline.rs — replicate the small match function rather than changing engram-ingest public API
+  - git2 needed as dev-dependency for the no-commit verification test
 ---

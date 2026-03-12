@@ -218,13 +218,16 @@ pub struct HooksConfig {
 pub struct WatcherConfig {
     pub enabled: bool,
     pub debounce_ms: u32,
+    #[serde(default)]
+    pub ignore: Vec<String>,
 }
 
 impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            debounce_ms: 500,
+            debounce_ms: 2000,
+            ignore: Vec::new(),
         }
     }
 }
