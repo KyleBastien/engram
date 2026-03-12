@@ -23,6 +23,8 @@ pub fn detect_language(path: &Path) -> ChunkerKind {
         "ts" | "tsx" => ChunkerKind::TreeSitter(Language::TypeScript),
         "rs" => ChunkerKind::TreeSitter(Language::Rust),
         "py" => ChunkerKind::TreeSitter(Language::Python),
+        "go" => ChunkerKind::TreeSitter(Language::Go),
+        "java" => ChunkerKind::TreeSitter(Language::Java),
         "c" | "h" => ChunkerKind::TreeSitter(Language::C),
         "cpp" | "cc" | "cxx" | "hpp" => ChunkerKind::TreeSitter(Language::Cpp),
 
@@ -75,6 +77,22 @@ mod tests {
         assert_eq!(
             detect_language(Path::new("script.py")),
             ChunkerKind::TreeSitter(Language::Python)
+        );
+    }
+
+    #[test]
+    fn go_go() {
+        assert_eq!(
+            detect_language(Path::new("main.go")),
+            ChunkerKind::TreeSitter(Language::Go)
+        );
+    }
+
+    #[test]
+    fn java_java() {
+        assert_eq!(
+            detect_language(Path::new("Main.java")),
+            ChunkerKind::TreeSitter(Language::Java)
         );
     }
 
