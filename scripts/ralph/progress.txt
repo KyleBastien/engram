@@ -1887,3 +1887,19 @@ Started: 03/09/2026 17:15:47
   - chunk_source is private in pipeline.rs — replicate the small match function rather than changing engram-ingest public API
   - git2 needed as dev-dependency for the no-commit verification test
 ---
+
+## 2026-03-11 - US-108
+- Implemented `engram watch` CLI command that starts file watcher in foreground
+- Prints file change events as detected and processed (change detected, re-indexed/removed, errors)
+- Ctrl+C triggers graceful shutdown via tokio::select! with tokio::signal::ctrl_c()
+- Integrated watcher with `engram serve`: when watcher.enabled is true and sources exist, spawns background watch loop
+- Added engram-watch dependency to engram-cli, re-exported notify::Event and EventKind from engram-watch
+- Added "signal" feature to tokio in engram-cli for Ctrl+C handling
+- 2 new CLI parsing tests (test_watch_default_path, test_watch_custom_path)
+- Files changed: crates/engram-cli/Cargo.toml, crates/engram-cli/src/main.rs, crates/engram-watch/src/lib.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - Re-export notify types (Event, EventKind) from engram-watch to avoid forcing engram-cli to add notify as a direct dependency
+  - tokio::signal::ctrl_c() requires the "signal" feature on tokio
+  - Use `tokio::select!` to wrap run_watch_loop + ctrl_c for graceful foreground shutdown; for serve integration, just spawn the watch loop as a background task
+  - `path.to_path_buf()` (not `path.clone()`) when path is `&Path` and you need a PathBuf for Debouncer::record
+---

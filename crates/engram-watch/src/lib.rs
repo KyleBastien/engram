@@ -14,7 +14,8 @@ use engram_store::{
     chunks_path, embeddings_path, write_chunks_jsonl, write_embeddings_bin, PRECISION_F32,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
+pub use notify::{Event, EventKind};
 use tokio::sync::mpsc;
 
 /// A file change event detected by the watcher.

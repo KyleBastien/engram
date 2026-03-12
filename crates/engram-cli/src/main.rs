@@ -20,6 +20,8 @@ use engram_dashboard::{
 use engram_mcp::{serve_sse, Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
+use engram_watch::{create_watcher, Debouncer, Event, EventKind, FileWatcher};
+use tokio::sync::mpsc;
 
 mod estimate;
 mod provider;
@@ -204,6 +206,13 @@ enum Commands {
         action: HooksAction,
     },
 
+    /// Watch source directories for changes and re-index in real time
+    Watch {
+        /// Path to the store directory (defaults to ./engram-store)
+        #[arg(long, default_value = "engram-store")]
+        path: PathBuf,
+    },
+
     /// Reindex source repositories
     Reindex {
         /// Force full re-chunk and re-embed
@@ -263,6 +272,87 @@ async fn run_reindex(
         report.chunks_deleted,
     );
     Ok(report)
+}
+
+/// Run the file watcher event loop, processing debounced changes until cancelled.
+async fn run_watch_loop(
+    file_watcher: &FileWatcher,
+    provider: &dyn EmbeddingProvider,
+    debouncer: &mut Debouncer,
+    rx: &mut mpsc::UnboundedReceiver<Event>,
+) {
+    loop {
+        // Poll for new events with a short timeout so we can check debouncer
+        let tick = tokio::time::sleep(std::time::Duration::from_millis(200));
+        tokio::pin!(tick);
+
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(ev) => {
+                        // Only process create/modify/remove events
+                        let dominated = matches!(
+                            ev.kind,
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                        );
+                        if dominated {
+                            for p in &ev.paths {
+                                if file_watcher.match_path(p).is_some() {
+                                    debouncer.record(p.to_path_buf());
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // Channel closed — watcher dropped
+                        eprintln!("engram: watcher channel closed, shutting down");
+                        return;
+                    }
+                }
+            }
+            _ = &mut tick => {}
+        }
+
+        // Process debounced events
+        let ready = debouncer.drain_ready();
+        for abs_path in ready {
+            if let Some((source_name, rel_path)) = file_watcher.match_path(&abs_path) {
+                eprintln!(
+                    "engram: change detected — {}/{}",
+                    source_name,
+                    rel_path.display()
+                );
+                match file_watcher
+                    .reindex_file(&source_name, &rel_path, provider)
+                    .await
+                {
+                    Ok(count) => {
+                        if count > 0 {
+                            eprintln!(
+                                "engram: re-indexed {}/{} ({} chunks)",
+                                source_name,
+                                rel_path.display(),
+                                count
+                            );
+                        } else {
+                            eprintln!(
+                                "engram: removed {}/{}",
+                                source_name,
+                                rel_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "engram: failed to reindex {}/{}: {e}",
+                            source_name,
+                            rel_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -437,6 +527,40 @@ async fn main() {
                     if let Err(e) = serve_dashboard(&dashboard_config, state).await {
                         eprintln!("Warning: dashboard server error: {e}");
                     }
+                });
+            }
+
+            // Start file watcher if enabled
+            if config.watcher.enabled && !config.sources.is_empty() {
+                let watcher_sources = config.sources.clone();
+                let watcher_config = config.watcher.clone();
+                let watcher_embedding = config.embedding.clone();
+                let watcher_path = path.clone();
+                tokio::spawn(async move {
+                    let file_watcher =
+                        match FileWatcher::new(&watcher_sources, &watcher_config, &watcher_path) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                eprintln!("Warning: failed to create file watcher: {e}");
+                                return;
+                            }
+                        };
+                    let watch_dirs = file_watcher.watch_dirs();
+                    let (_watcher_handle, mut rx) = match create_watcher(&watch_dirs) {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            eprintln!("Warning: failed to start file watcher: {e}");
+                            return;
+                        }
+                    };
+                    let provider =
+                        provider::OllamaProvider::from_config(&watcher_embedding);
+                    let mut debouncer = Debouncer::new(file_watcher.debounce_duration());
+                    eprintln!(
+                        "engram: file watcher started ({} source(s))",
+                        watcher_sources.len()
+                    );
+                    run_watch_loop(&file_watcher, &provider, &mut debouncer, &mut rx).await;
                 });
             }
 
@@ -810,6 +934,58 @@ async fn main() {
                 }
             }
         },
+        Commands::Watch { path } => {
+            if !path.join(".engram").exists() {
+                eprintln!("Error: no engram store found at {}", path.display());
+                eprintln!("Hint: run `engram init --local` first");
+                process::exit(1);
+            }
+
+            let config = match load_config(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            };
+
+            if config.sources.is_empty() {
+                eprintln!("Error: no source repos configured in engram.config.yaml");
+                process::exit(1);
+            }
+
+            let file_watcher = match FileWatcher::new(&config.sources, &config.watcher, &path) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Error: failed to create file watcher: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let watch_dirs = file_watcher.watch_dirs();
+            let (_watcher, mut rx) = match create_watcher(&watch_dirs) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("Error: failed to start file watcher: {e}");
+                    process::exit(1);
+                }
+            };
+
+            let provider = provider::OllamaProvider::from_config(&config.embedding);
+            let mut debouncer = Debouncer::new(file_watcher.debounce_duration());
+
+            eprintln!("engram: watching {} source(s) for changes (Ctrl+C to stop)", config.sources.len());
+            for src in &config.sources {
+                eprintln!("  - {} ({})", src.name, src.path);
+            }
+
+            tokio::select! {
+                _ = run_watch_loop(&file_watcher, &provider, &mut debouncer, &mut rx) => {}
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nengram: shutting down watcher");
+                }
+            }
+        }
         Commands::Reindex {
             full,
             incremental: _,
@@ -2400,5 +2576,29 @@ mod tests {
         let block = engram_hook_block();
         assert!(block.contains(HOOK_MARKER));
         assert!(block.contains("engram reindex --incremental --commit HEAD"));
+    }
+
+    #[test]
+    fn test_watch_default_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "watch"]);
+        match cli.command {
+            Commands::Watch { path } => {
+                assert_eq!(path, PathBuf::from("engram-store"));
+            }
+            _ => panic!("expected Watch command"),
+        }
+    }
+
+    #[test]
+    fn test_watch_custom_path() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "watch", "--path", "/custom/store"]);
+        match cli.command {
+            Commands::Watch { path } => {
+                assert_eq!(path, PathBuf::from("/custom/store"));
+            }
+            _ => panic!("expected Watch command"),
+        }
     }
 }

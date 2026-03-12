@@ -704,6 +704,7 @@ dependencies = [
  "engram-mcp",
  "engram-query",
  "engram-store",
+ "engram-watch",
  "git2",
  "globset",
  "reqwest",
