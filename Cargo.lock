@@ -618,6 +618,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-provider-voyage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "engram-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "engram-query"
 version = "0.1.0"
 dependencies = [
