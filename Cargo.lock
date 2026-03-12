@@ -504,6 +504,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
+ "engram-bench",
  "engram-core",
  "engram-dashboard",
  "engram-ingest",
@@ -592,6 +593,19 @@ dependencies = [
 
 [[package]]
 name = "engram-provider-ollama"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "engram-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "engram-provider-openai"
 version = "0.1.0"
 dependencies = [
  "async-trait",

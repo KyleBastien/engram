@@ -1673,3 +1673,19 @@ Started: 03/09/2026 17:15:47
   - benchmark runs stored as JSONL in `{store}/metrics/runs/`; first line=session, middle=events, last line=report
   - engram-bench list_runs() reads back from disk; sorted by filename (timestamp prefix ensures chronological order)
 ---
+
+## 2026-03-11 - US-096
+- Implemented OpenAI embedding provider crate at `crates/engram-providers/openai/`
+- Implements `EmbeddingProvider` trait with `name()` returning `openai/{model_name}`
+- Sends POST to `/v1/embeddings` with Bearer auth; supports custom `base_url` for Azure/proxies
+- Reads API key from `OPENAI_API_KEY` env var or explicit key parameter
+- Handles rate limiting: 429 status returns `EmbedError::RateLimited` with Retry-After value
+- Configurable `timeout` and `max_retries` (retries on transient errors, not rate limits)
+- Sorts response embeddings by index to preserve input order
+- 15 tests passing with wiremock-based HTTP mocking
+- Files changed: `Cargo.toml` (workspace), `crates/engram-providers/openai/Cargo.toml`, `crates/engram-providers/openai/project.json`, `crates/engram-providers/openai/src/lib.rs`, `tasks/prd.json`
+- **Learnings for future iterations:**
+  - OpenAI embeddings API returns data with `index` field — must sort by index to preserve order
+  - Provider crate pattern: Cargo.toml mirrors ollama provider deps, project.json for Nx, `with_client()` constructor for test injection
+  - Rate limiting should NOT be retried (return immediately); only transient 5xx errors should be retried
+---

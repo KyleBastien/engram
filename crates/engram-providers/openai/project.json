@@ -1,0 +1,26 @@
+{
+  "name": "engram-provider-openai",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build -p engram-provider-openai",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test -p engram-provider-openai",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p engram-provider-openai -- -D warnings",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}
