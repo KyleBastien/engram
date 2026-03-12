@@ -2,6 +2,9 @@
 Started: 03/09/2026 17:15:47
 
 ## Codebase Patterns
+- ort 2.0.0-rc.12 API paths: `ort::session::Session`, `ort::session::builder::GraphOptimizationLevel`, `ort::ep::CUDA`; Session::run needs `&mut self` (use Mutex)
+- ort uses ndarray 0.17; use `TensorRef::from_array_view()` for inputs, `try_extract_array::<f32>()` for outputs
+- tokenizers crate needs `fancy-regex` feature when using `default-features = false`
 - axum nest() strips the prefix from request URIs; static_handler must trim leading `/` after `trim_start_matches("/dashboard/")` for asset lookup
 - New REST API endpoints: add route in `build_router_with_state()`, add handler fn, add data to `DashboardState` behind `Arc<RwLock<T>>`
 - Dashboard HTML views follow pattern: nav links across all pages, loading/error states, IIFE wrapper, fetch+setInterval(30s) for REST data
@@ -1688,4 +1691,39 @@ Started: 03/09/2026 17:15:47
   - OpenAI embeddings API returns data with `index` field — must sort by index to preserve order
   - Provider crate pattern: Cargo.toml mirrors ollama provider deps, project.json for Nx, `with_client()` constructor for test injection
   - Rate limiting should NOT be retried (return immediately); only transient 5xx errors should be retried
+---
+
+## 2026-03-11 - US-097
+- Implemented Voyage AI embedding provider crate (engram-provider-voyage)
+- VoyageConfig with defaults: base_url=api.voyageai.com, model=voyage-code-3, dimensions=1024, max_batch_size=128
+- Implements EmbeddingProvider trait with retry logic, rate limiting (429), bearer auth
+- Reads API key from VOYAGE_API_KEY env var
+- 14 tests passing with wiremock HTTP mocking
+- Files changed: Cargo.toml (workspace member), crates/engram-providers/voyage/Cargo.toml, crates/engram-providers/voyage/src/lib.rs
+- **Learnings for future iterations:**
+  - Voyage API uses same OpenAI-compatible format: POST /v1/embeddings with {model, input} → {data: [{embedding, index}]}
+  - Provider crate structure is consistent: same deps (async-trait, engram-core, reqwest, serde, serde_json) and dev-deps (tokio, wiremock)
+  - Voyage default model is voyage-code-3 (code-optimized), dimensions 1024, max_batch_size 128
+---
+
+## 2026-03-11 - US-098
+- Implemented ONNX in-process embedding provider crate (engram-provider-onnx)
+- OnnxConfig with defaults: model_name=all-MiniLM-L6-v2, dimensions=384, max_batch_size=256, quantized=false, device=Cpu
+- Implements EmbeddingProvider trait using ort 2.0.0-rc.12 crate for ONNX Runtime inference
+- Model auto-download from HuggingFace to ~/.engram/models/ on first use
+- Supports quantized (INT8) models and CUDA device config via ort::ep::CUDA
+- Tokenization via HuggingFace tokenizers crate (0.22) with model's bundled tokenizer.json
+- Mean pooling + L2 normalization for sentence embeddings; handles both 2D and 3D model outputs
+- Session wrapped in Mutex for interior mutability (Session::run requires &mut self)
+- 19 tests passing: config, path resolution, download URLs, normalization, mean pooling, tensor building, error handling
+- Files changed: Cargo.toml (workspace member), crates/engram-providers/onnx/Cargo.toml, crates/engram-providers/onnx/project.json, crates/engram-providers/onnx/src/lib.rs
+- **Learnings for future iterations:**
+  - ort 2.0.0-rc.12 API: Session at `ort::session::Session`, GraphOptimizationLevel at `ort::session::builder::GraphOptimizationLevel`
+  - ort Session::run requires `&mut self` — wrap in Mutex for use behind `&self` trait methods
+  - ort uses ndarray 0.17 (not 0.16) — must match versions for TensorArrayData compatibility
+  - ort execution providers are in `ort::ep::*` (e.g., `ort::ep::CUDA`), not at crate root
+  - Use `TensorRef::from_array_view(array.view())` to create input tensors from ndarray
+  - Use `try_extract_array::<f32>()` (not `try_extract_tensor`) for ndarray ArrayViewD output
+  - tokenizers crate requires either `onig` or `fancy-regex` feature — use `fancy-regex` (pure Rust, no native deps)
+  - Clippy enforces `#[default]` attribute on enum variants instead of manual Default impl
 ---
