@@ -693,6 +693,7 @@ dependencies = [
  "engram-query",
  "engram-store",
  "git2",
+ "globset",
  "reqwest",
  "serde_json",
  "serde_yaml",

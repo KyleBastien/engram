@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+engram-bench = { path = "../engram-bench" }
 engram-core = { path = "../engram-core" }
 engram-dashboard = { path = "../engram-dashboard" }
 engram-store = { path = "../engram-store" }
@@ -17,6 +18,7 @@ serde_yaml = "0.9"
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
+globset = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

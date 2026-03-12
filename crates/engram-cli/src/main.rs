@@ -21,6 +21,7 @@ use engram_mcp::{serve_sse, Context, McpServer};
 use engram_query::IndexManager;
 use engram_store::{compact_snapshots, read_manifest, sync_pull, sync_push, Store};
 
+mod estimate;
 mod provider;
 
 #[derive(Parser)]
@@ -200,6 +201,10 @@ enum Commands {
         /// Only reindex this source repo
         #[arg(long)]
         repo: Option<String>,
+
+        /// Estimate cost without performing reindex
+        #[arg(long)]
+        estimate: bool,
 
         /// Path to the store directory (defaults to ./engram-store)
         #[arg(long, default_value = "engram-store")]
@@ -778,6 +783,7 @@ async fn main() {
             incremental: _,
             paths,
             repo,
+            estimate,
             path,
         } => {
             if !path.join(".engram").exists() {
@@ -812,6 +818,12 @@ async fn main() {
                     eprintln!("Error: no source repos configured in engram.config.yaml");
                 }
                 process::exit(1);
+            }
+
+            if estimate {
+                let cost = estimate::estimate_reindex_cost(&sources);
+                estimate::print_estimate(&cost);
+                return;
             }
 
             let provider = provider::OllamaProvider::from_config(&config.embedding);
@@ -1114,6 +1126,45 @@ mod tests {
                 assert_eq!(paths, Some("**/*.rs".to_string()));
                 assert_eq!(repo, Some("my-repo".to_string()));
                 assert_eq!(path, PathBuf::from("/tmp/store"));
+            }
+            _ => panic!("expected Reindex command"),
+        }
+    }
+
+    #[test]
+    fn test_reindex_estimate_flag() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "reindex", "--estimate"]);
+        match cli.command {
+            Commands::Reindex { estimate, .. } => {
+                assert!(estimate);
+            }
+            _ => panic!("expected Reindex command"),
+        }
+    }
+
+    #[test]
+    fn test_reindex_estimate_defaults_false() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "reindex"]);
+        match cli.command {
+            Commands::Reindex { estimate, .. } => {
+                assert!(!estimate);
+            }
+            _ => panic!("expected Reindex command"),
+        }
+    }
+
+    #[test]
+    fn test_reindex_estimate_with_repo_filter() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["engram", "reindex", "--estimate", "--repo", "my-project"]);
+        match cli.command {
+            Commands::Reindex {
+                estimate, repo, ..
+            } => {
+                assert!(estimate);
+                assert_eq!(repo, Some("my-project".to_string()));
             }
             _ => panic!("expected Reindex command"),
         }

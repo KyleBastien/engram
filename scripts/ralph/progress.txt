@@ -103,6 +103,7 @@ Started: 03/09/2026 17:15:47
 - EventBroadcaster (engram-dashboard) wraps broadcast::Sender<DashboardEvent>; clone and share between MCP server and dashboard
 - DashboardEvent uses `#[serde(tag = "type", rename_all = "snake_case")]` for JSON events with `type` field
 - axum 0.7 path parameters use `:param` syntax (not `{param}` which is axum 0.8+)
+- Clippy enforces `usize::div_ceil()` over manual `(n + d - 1) / d` — `manual_div_ceil` lint
 - tokio-tungstenite v0.24 + futures-util v0.3 for WebSocket client in tests (dev-dependencies)
 
 ---
@@ -1726,4 +1727,52 @@ Started: 03/09/2026 17:15:47
   - Use `try_extract_array::<f32>()` (not `try_extract_tensor`) for ndarray ArrayViewD output
   - tokenizers crate requires either `onig` or `fancy-regex` feature — use `fancy-regex` (pure Rust, no native deps)
   - Clippy enforces `#[default]` attribute on enum variants instead of manual Default impl
+---
+
+## 2026-03-11 - US-099
+- Implemented custom HTTP embedding provider at `crates/engram-providers/custom/`
+- CustomProvider sends POST `{texts: [...]}` to a configured endpoint, expects `{embeddings: [[...]]}`
+- Reads dimensions, max_batch_size, endpoint, name from CustomConfig
+- Supports custom headers with `${ENV_VAR}` substitution via `substitute_env_vars()` parser
+- 18 tests: embed single/batch, error handling (429/500/unreachable), retry logic, custom headers, env var substitution (missing, multiple, unclosed brace), request body format, config defaults
+- Files changed: Cargo.toml (workspace member), crates/engram-providers/custom/Cargo.toml, project.json, src/lib.rs
+- **Learnings for future iterations:**
+  - Custom provider uses a simpler request/response format than OpenAI/Voyage — no model field, no index-based ordering
+  - Env var substitution is done eagerly at provider creation time (not per-request) for consistency
+  - `reqwest::header::HeaderName::from_bytes` and `HeaderValue::from_str` can fail on invalid header names/values — handle as EmbedError::Api
+---
+
+## 2026-03-11 - US-100
+- Implemented provider switching detection and reindex guard
+- On boot (CLI serve), reads manifest.json and compares `model_name`/`dimensions` against configured embedding provider
+- If mismatch detected: logs warning, sets `mismatch_reason` on EngineState
+- Search (`engram_search`), lookup (`engram_lookup`), and related (`engram_related`) handlers check `mismatch_reason` and return error with suggestion to run `engram reindex --full`
+- `engram_status` reports `provider_mismatch` field (null when matched, string message when mismatched)
+- After `engram reindex --full`, manifest is updated with new model/dimensions, so mismatch clears on next boot
+- Files changed: crates/engram-mcp/src/server.rs, crates/engram-cli/src/main.rs
+- 6 new tests: mismatch blocks search/lookup/related, mismatch reported in status, no-mismatch allows search, no-mismatch status null
+- All 257 engram-mcp tests pass, 85 engram-query tests pass, clippy clean
+- **Learnings for future iterations:**
+  - `set_boot_info` is called in tests too — when changing its signature, search for all call sites in tests (3951, 4972 at time of writing)
+  - `EngineState.mismatch_reason: Option<String>` is the pattern for boot-time guards that block certain operations
+  - Manifest comparison uses `model_name` (String) and `dimensions` (usize) fields
+---
+
+## 2026-03-11 - US-101
+- Implemented cost estimation for paid embedding providers via `engram reindex --estimate`
+- Created new `estimate.rs` module in engram-cli with pricing tables for OpenAI text-embedding-3-small, text-embedding-3-large, and Voyage voyage-code-3
+- Uses real chunkers (TreeSitter, Markdown, SlidingWindow) from engram-ingest for accurate chunk counting
+- Token estimation uses ~1 token per 4 characters heuristic
+- Walks source repos with include/exclude glob pattern filtering
+- Does NOT perform any embedding API calls
+- Output shows: estimated chunks, tokens, estimated time, and per-model cost in USD
+- Added `--estimate` flag to Reindex command (works alongside `--repo` filter)
+- Added globset dependency to engram-cli for glob pattern matching
+- Files changed: crates/engram-cli/src/estimate.rs (new), crates/engram-cli/src/main.rs, crates/engram-cli/Cargo.toml, Cargo.lock
+- 11 new tests (8 in estimate.rs, 3 CLI arg parsing tests in main.rs), all 74 engram-cli tests pass, clippy clean
+- **Learnings for future iterations:**
+  - Clippy enforces `div_ceil()` over manual `(n + d - 1) / d` pattern — use `usize::div_ceil()` directly
+  - engram-ingest publicly exports all chunkers + detect_language, so estimation can reuse real chunking logic without duplication
+  - globset is already a transitive dependency via engram-ingest; add it directly when needed in other crates
+  - Source directory walking should skip `.` dirs, `node_modules`, `target` for performance
 ---
