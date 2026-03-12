@@ -617,7 +617,7 @@ async fn main() {
             println!("  [1/4] Detecting project metadata...");
 
             let start = Instant::now();
-            match engram_ingest::run_onboarding(&repo_path, &path, &source, onboarding_depth).await
+            match engram_ingest::run_onboarding(&repo_path, &path, &source, onboarding_depth, Some(&config.symbol_resolution)).await
             {
                 Ok(report) => {
                     let elapsed = start.elapsed();
@@ -1738,6 +1738,7 @@ mod tests {
             &store_path,
             &source,
             engram_core::OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -1768,6 +1769,7 @@ mod tests {
             &store_path,
             &source,
             engram_core::OnboardingDepth::Standard,
+            None,
         )
         .await
         .unwrap();

@@ -110,6 +110,8 @@ Started: 03/09/2026 17:15:47
 - lsp-types v0.97 `InitializeParams.root_uri` is deprecated — needs `#[allow(deprecated)]`, prefer `workspace_folders`
 - lsp-types v0.97 `ReferenceClientCapabilities = DynamicRegistrationClientCapabilities` (not `GotoCapability`)
 - ServerManager pattern: `ensure_server()` + `servers().lock()` avoids lifetime issues with async closures over `&LspClient`
+- `run_onboarding()` takes `symbol_config: Option<&SymbolResolutionConfig>` — pass `None` when config unavailable (tree-sitter fallback)
+- Avoid starting real LSP servers in unit tests — they can hang; use `enabled: false` or test with unsupported languages
 
 ---
 
@@ -1828,4 +1830,23 @@ Started: 03/09/2026 17:15:47
   - `install_spec_for()` returns install commands per server; rust-analyzer is special-cased (check-only, no auto-install command)
   - `command_exists()` uses `which` to check PATH availability; works on macOS/Linux
   - ServerManager.ensure_server() now returns Ok(None) when server not found (graceful fallback) instead of Err
+---
+
+## 2026-03-11 - US-105
+- Integrated LSP with deep onboarding depth in `run_onboarding()`
+- Added `symbol_config: Option<&SymbolResolutionConfig>` parameter to `run_onboarding()`
+- When `OnboardingDepth::Deep` and `symbol_resolution.backend == "lsp"`, uses `LspSymbolResolver` for richer key-abstractions with type hierarchy
+- `extract_key_abstractions_lsp()` uses LSP to get exact symbol exports and enriches abstractions with parent/child type relationships
+- Falls back to tree-sitter with warning if: LSP not configured, LSP disabled, LSP returns no results, or LSP fails
+- Added `is_lsp_backend()` helper to check config
+- Made `collect_source_files` and `detect_patterns` `pub(crate)` in abstractions module for reuse
+- Added `engram-lsp` as a dependency of `engram-ingest`
+- Updated all callers: engram-cli passes `config.symbol_resolution`, engram-mcp passes `None`
+- Added tests: `deep_onboarding_with_lsp_config_falls_back`, `deep_onboarding_without_lsp_backend_uses_treesitter`, `is_lsp_backend_checks_enabled_and_backend`
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/onboarding.rs, crates/engram-ingest/src/abstractions.rs, crates/engram-cli/src/main.rs, crates/engram-mcp/src/server.rs, tasks/prd.json
+- **Learnings for future iterations:**
+  - `run_onboarding()` now takes 5 args; pass `None` for `symbol_config` when config is unavailable (falls back to tree-sitter)
+  - LSP tests can hang if a real language server (e.g., rust-analyzer) is installed — avoid testing real LSP in unit tests; use `enabled: false` or non-matching languages
+  - `is_lsp_backend()` uses `is_some_and()` per clippy `unnecessary_map_or` lint
+  - `collect_source_files` and `detect_patterns` in abstractions.rs are `pub(crate)` for reuse by onboarding LSP path
 ---

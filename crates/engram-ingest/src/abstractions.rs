@@ -134,7 +134,7 @@ struct RawDeclaration {
     is_exported: bool,
 }
 
-fn collect_source_files(
+pub(crate) fn collect_source_files(
     root: &Path,
     current: &Path,
     target_lang: &Option<Language>,
@@ -523,7 +523,7 @@ fn is_skipped_dir(name: &str) -> bool {
     )
 }
 
-fn detect_patterns(abstractions: &[Abstraction], language: &str) -> Vec<PatternInfo> {
+pub(crate) fn detect_patterns(abstractions: &[Abstraction], language: &str) -> Vec<PatternInfo> {
     let mut patterns = Vec::new();
 
     // Count abstractions by kind

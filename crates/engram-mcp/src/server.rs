@@ -1866,7 +1866,7 @@ async fn handle_engram_onboard(
         exclude: vec![],
     };
 
-    match engram_ingest::run_onboarding(&repo_path, &store_path, &source_config, depth).await {
+    match engram_ingest::run_onboarding(&repo_path, &store_path, &source_config, depth, None).await {
         Ok(report) => {
             let result = serde_json::to_value(&report).unwrap_or_default();
             JsonRpcResponse::success(

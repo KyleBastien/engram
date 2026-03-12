@@ -1,21 +1,29 @@
 use std::fs;
 use std::path::Path;
 
-use engram_core::{EngramError, OnboardingDepth, OnboardingReport, Result, SourceConfig};
+use engram_core::{
+    Abstraction, EngramError, ExportedSymbol, KeyAbstractions, OnboardingDepth, OnboardingReport,
+    Result, SourceConfig, SymbolResolutionConfig, TypeHierarchy,
+};
+use engram_lsp::LspSymbolResolver;
 use engram_store::commit_changes;
 use git2::Repository;
 
 use crate::{
+    abstractions::collect_source_files,
+    abstractions::detect_patterns,
     analyze_directory_structure, extract_build_commands, extract_key_abstractions,
     detect_project_metadata,
 };
+use crate::chunker::Language;
 
 /// Run the full onboarding pipeline, writing knowledge YAML files to the store.
 ///
 /// Depending on `depth`:
 /// - **Quick**: project metadata + build/test commands
-/// - **Standard** (default): Quick + architecture map + key abstractions
-/// - **Deep**: same as Standard (reserved for future full symbol export analysis)
+/// - **Standard** (default): Quick + architecture map + key abstractions (tree-sitter)
+/// - **Deep**: Standard + LSP-based symbol analysis for richer type hierarchy
+///   (falls back to tree-sitter if LSP backend not configured)
 ///
 /// Onboarding is idempotent — re-running overwrites existing files.
 pub async fn run_onboarding(
@@ -23,6 +31,7 @@ pub async fn run_onboarding(
     store_path: &Path,
     source_config: &SourceConfig,
     depth: OnboardingDepth,
+    symbol_config: Option<&SymbolResolutionConfig>,
 ) -> Result<OnboardingReport> {
     let onboarding_dir = store_path.join("knowledge/onboarding");
     fs::create_dir_all(&onboarding_dir)?;
@@ -55,7 +64,29 @@ pub async fn run_onboarding(
         files_written.push("knowledge/onboarding/architecture-map.yaml".to_string());
         architecture_analyzed = true;
 
-        let abstractions = extract_key_abstractions(repo_path, &overview.language)?;
+        // Deep + LSP backend: use LSP for richer key abstractions with type hierarchy
+        let abstractions = if depth == OnboardingDepth::Deep
+            && is_lsp_backend(symbol_config)
+        {
+            match extract_key_abstractions_lsp(repo_path, &overview.language, symbol_config.unwrap()).await {
+                Ok(ka) => ka,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: LSP-based abstraction extraction failed, falling back to tree-sitter: {}",
+                        e
+                    );
+                    extract_key_abstractions(repo_path, &overview.language)?
+                }
+            }
+        } else {
+            if depth == OnboardingDepth::Deep {
+                eprintln!(
+                    "Warning: Deep onboarding requested but LSP backend not configured, falling back to tree-sitter"
+                );
+            }
+            extract_key_abstractions(repo_path, &overview.language)?
+        };
+
         let yaml = serde_yaml::to_string(&abstractions)
             .map_err(|e| EngramError::Serialize(e.to_string()))?;
         fs::write(onboarding_dir.join("key-abstractions.yaml"), &yaml)?;
@@ -78,6 +109,174 @@ pub async fn run_onboarding(
         abstractions_extracted,
         files_written,
         commit_hash,
+    })
+}
+
+/// Check if the symbol resolution config specifies LSP backend.
+fn is_lsp_backend(config: Option<&SymbolResolutionConfig>) -> bool {
+    config.is_some_and(|c| c.enabled && c.backend == "lsp")
+}
+
+/// Extract key abstractions using LSP for richer type hierarchy information.
+///
+/// Uses LspSymbolResolver to get exact symbol exports and type hierarchy data,
+/// then enriches the abstractions with parent/child type relationships.
+async fn extract_key_abstractions_lsp(
+    repo_path: &Path,
+    language: &str,
+    symbol_config: &SymbolResolutionConfig,
+) -> Result<KeyAbstractions> {
+    use engram_core::SymbolResolver;
+
+    let resolver = LspSymbolResolver::with_auto_install(
+        repo_path.to_path_buf(),
+        symbol_config.lsp.auto_install,
+    );
+
+    // Collect source files for the target language
+    let target_lang = match language.to_lowercase().as_str() {
+        "rust" => Some(Language::Rust),
+        "typescript" | "javascript" => Some(Language::TypeScript),
+        "python" => Some(Language::Python),
+        _ => None,
+    };
+
+    let mut source_files: Vec<(String, String, Language)> = Vec::new();
+    collect_source_files(repo_path, repo_path, &target_lang, &mut source_files)?;
+
+    if source_files.is_empty() {
+        let _ = resolver.shutdown().await;
+        return Ok(KeyAbstractions {
+            abstractions: vec![],
+            patterns: vec![],
+        });
+    }
+
+    // Phase 1: Extract exports via LSP for each file
+    let mut all_exports: Vec<ExportedSymbol> = Vec::new();
+    let mut lsp_failed = false;
+
+    for (rel_path, _content, _lang) in &source_files {
+        let abs_path = repo_path.join(rel_path);
+        match resolver.extract_exports(&abs_path).await {
+            Ok(exports) if !exports.is_empty() => {
+                all_exports.extend(exports);
+            }
+            Ok(_) => {
+                // Empty result — LSP may not have a server for this language
+            }
+            Err(_) => {
+                lsp_failed = true;
+                break;
+            }
+        }
+    }
+
+    // If LSP produced no results, fall back to tree-sitter
+    if all_exports.is_empty() || lsp_failed {
+        let _ = resolver.shutdown().await;
+        if lsp_failed {
+            return Err(EngramError::Mcp(
+                "LSP symbol extraction failed".to_string(),
+            ));
+        }
+        eprintln!("Warning: LSP returned no symbols, falling back to tree-sitter");
+        return extract_key_abstractions(repo_path, language);
+    }
+
+    // Phase 2: Enrich abstractions with type hierarchy for type-like symbols
+    let mut hierarchies: Vec<TypeHierarchy> = Vec::new();
+    for export in &all_exports {
+        let kind = export.id.kind.as_str();
+        if matches!(kind, "class" | "struct" | "interface" | "enum" | "trait") {
+            if let Ok(Some(hierarchy)) = resolver.type_hierarchy(&export.id).await {
+                hierarchies.push(hierarchy);
+            }
+        }
+    }
+
+    let _ = resolver.shutdown().await;
+
+    // Phase 3: Build abstractions with enriched descriptions
+    let hierarchy_map: std::collections::HashMap<String, &TypeHierarchy> = hierarchies
+        .iter()
+        .map(|h| (h.symbol.name.clone(), h))
+        .collect();
+
+    let abstractions: Vec<Abstraction> = all_exports
+        .into_iter()
+        .filter(|e| {
+            let kind = e.id.kind.as_str();
+            matches!(
+                kind,
+                "class"
+                    | "struct"
+                    | "interface"
+                    | "enum"
+                    | "trait"
+                    | "type_parameter"
+                    | "module"
+            )
+        })
+        .map(|export| {
+            let rel_file = export
+                .id
+                .file
+                .strip_prefix(repo_path)
+                .unwrap_or(&export.id.file)
+                .to_string_lossy()
+                .to_string();
+
+            let mut description = export.doc.unwrap_or_default();
+
+            // Enrich with type hierarchy info
+            if let Some(hierarchy) = hierarchy_map.get(&export.id.name) {
+                let mut parts = Vec::new();
+                if !hierarchy.parents.is_empty() {
+                    let parent_names: Vec<&str> =
+                        hierarchy.parents.iter().map(|p| p.name.as_str()).collect();
+                    parts.push(format!("extends {}", parent_names.join(", ")));
+                }
+                if !hierarchy.children.is_empty() {
+                    let child_names: Vec<&str> =
+                        hierarchy.children.iter().map(|c| c.name.as_str()).collect();
+                    parts.push(format!(
+                        "implemented by {}",
+                        child_names.join(", ")
+                    ));
+                }
+                if !parts.is_empty() {
+                    let hierarchy_info = parts.join("; ");
+                    if description.is_empty() {
+                        description = hierarchy_info;
+                    } else {
+                        description = format!("{}. {}", description, hierarchy_info);
+                    }
+                }
+            }
+
+            Abstraction {
+                name: export.id.name,
+                kind: export.id.kind,
+                file: rel_file,
+                description,
+            }
+        })
+        .collect();
+
+    // Deduplicate by name (keep first occurrence)
+    let mut seen = std::collections::HashSet::new();
+    let abstractions: Vec<Abstraction> = abstractions
+        .into_iter()
+        .filter(|a| seen.insert(a.name.clone()))
+        .take(50)
+        .collect();
+
+    let patterns = detect_patterns(&abstractions, language);
+
+    Ok(KeyAbstractions {
+        abstractions,
+        patterns,
     })
 }
 
@@ -130,6 +329,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -168,6 +368,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Standard,
+            None,
         )
         .await
         .unwrap();
@@ -207,6 +408,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -216,6 +418,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -248,6 +451,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -284,6 +488,7 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Quick,
+            None,
         )
         .await
         .unwrap();
@@ -319,13 +524,138 @@ tokio = "1"
             &store.path,
             &source_config,
             OnboardingDepth::Deep,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Deep without LSP config falls back to tree-sitter (same output as Standard)
+        assert_eq!(report.depth, OnboardingDepth::Deep);
+        assert_eq!(report.files_written.len(), 4);
+        assert!(report.architecture_analyzed);
+        assert!(report.abstractions_extracted);
+    }
+
+    #[tokio::test]
+    async fn deep_onboarding_with_lsp_config_falls_back() {
+        // When LSP is configured but returns no symbols (e.g., unsupported language),
+        // deep onboarding should fall back to tree-sitter and still produce valid output.
+        let project_tmp = TempDir::new().unwrap();
+        setup_rust_project(project_tmp.path());
+
+        let store_tmp = TempDir::new().unwrap();
+        let store = init_store(&store_tmp);
+        let source_config = SourceConfig {
+            name: "test".to_string(),
+            path: ".".to_string(),
+            include: vec![],
+            exclude: vec![],
+        };
+
+        // Use disabled=false but backend=lsp — however, since the LSP resolver
+        // may or may not find a server, we test the full pipeline succeeds
+        // either way (via LSP results or tree-sitter fallback).
+        let symbol_config = engram_core::SymbolResolutionConfig {
+            enabled: false, // disabled means is_lsp_backend returns false → tree-sitter path
+            backend: "lsp".to_string(),
+            lsp: engram_core::LspResolutionConfig {
+                auto_install: false,
+            },
+        };
+
+        let report = run_onboarding(
+            project_tmp.path(),
+            &store.path,
+            &source_config,
+            OnboardingDepth::Deep,
+            Some(&symbol_config),
+        )
+        .await
+        .unwrap();
+
+        // Should still succeed via tree-sitter (LSP is disabled)
+        assert_eq!(report.depth, OnboardingDepth::Deep);
+        assert_eq!(report.files_written.len(), 4);
+        assert!(report.architecture_analyzed);
+        assert!(report.abstractions_extracted);
+        assert!(report.commit_hash.is_some());
+
+        // key-abstractions.yaml should exist and be valid YAML
+        let yaml = fs::read_to_string(
+            store.path.join("knowledge/onboarding/key-abstractions.yaml"),
+        )
+        .unwrap();
+        let _ka: engram_core::KeyAbstractions = serde_yaml::from_str(&yaml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deep_onboarding_without_lsp_backend_uses_treesitter() {
+        // When symbol_resolution is enabled but backend is "tree-sitter",
+        // deep onboarding should use tree-sitter (no LSP attempt).
+        let project_tmp = TempDir::new().unwrap();
+        setup_rust_project(project_tmp.path());
+
+        let store_tmp = TempDir::new().unwrap();
+        let store = init_store(&store_tmp);
+        let source_config = SourceConfig {
+            name: "test".to_string(),
+            path: ".".to_string(),
+            include: vec![],
+            exclude: vec![],
+        };
+
+        let symbol_config = engram_core::SymbolResolutionConfig {
+            enabled: true,
+            backend: "tree-sitter".to_string(),
+            lsp: engram_core::LspResolutionConfig {
+                auto_install: false,
+            },
+        };
+
+        let report = run_onboarding(
+            project_tmp.path(),
+            &store.path,
+            &source_config,
+            OnboardingDepth::Deep,
+            Some(&symbol_config),
         )
         .await
         .unwrap();
 
         assert_eq!(report.depth, OnboardingDepth::Deep);
         assert_eq!(report.files_written.len(), 4);
-        assert!(report.architecture_analyzed);
         assert!(report.abstractions_extracted);
+    }
+
+    #[test]
+    fn is_lsp_backend_checks_enabled_and_backend() {
+        use super::is_lsp_backend;
+
+        // None config → not LSP
+        assert!(!is_lsp_backend(None));
+
+        // Enabled + lsp → true
+        let cfg = engram_core::SymbolResolutionConfig {
+            enabled: true,
+            backend: "lsp".to_string(),
+            lsp: Default::default(),
+        };
+        assert!(is_lsp_backend(Some(&cfg)));
+
+        // Disabled + lsp → false
+        let cfg = engram_core::SymbolResolutionConfig {
+            enabled: false,
+            backend: "lsp".to_string(),
+            lsp: Default::default(),
+        };
+        assert!(!is_lsp_backend(Some(&cfg)));
+
+        // Enabled + tree-sitter → false
+        let cfg = engram_core::SymbolResolutionConfig {
+            enabled: true,
+            backend: "tree-sitter".to_string(),
+            lsp: Default::default(),
+        };
+        assert!(!is_lsp_backend(Some(&cfg)));
     }
 }

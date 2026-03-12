@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 engram-core = { path = "../engram-core" }
+engram-lsp = { path = "../engram-lsp" }
 engram-store = { path = "../engram-store" }
 tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
