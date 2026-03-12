@@ -1,0 +1,26 @@
+{
+  "name": "engram-lsp",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build -p engram-lsp",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test -p engram-lsp",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p engram-lsp -- -D warnings",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

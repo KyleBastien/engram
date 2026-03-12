@@ -15,4 +15,5 @@ members = [
     "crates/engram-providers/custom",
     "crates/engram-bench",
     "crates/engram-dashboard",
+    "crates/engram-lsp",
 ]

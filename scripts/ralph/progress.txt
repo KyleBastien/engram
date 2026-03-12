@@ -103,8 +103,13 @@ Started: 03/09/2026 17:15:47
 - EventBroadcaster (engram-dashboard) wraps broadcast::Sender<DashboardEvent>; clone and share between MCP server and dashboard
 - DashboardEvent uses `#[serde(tag = "type", rename_all = "snake_case")]` for JSON events with `type` field
 - axum 0.7 path parameters use `:param` syntax (not `{param}` which is axum 0.8+)
+- half v2 for f16 support: `f16::from_f32()` / `f16::to_f32()` for conversion; `write_embeddings_bin` takes precision param (PRECISION_F32=0, PRECISION_F16=1)
 - Clippy enforces `usize::div_ceil()` over manual `(n + d - 1) / d` — `manual_div_ceil` lint
 - tokio-tungstenite v0.24 + futures-util v0.3 for WebSocket client in tests (dev-dependencies)
+- lsp-types v0.97 uses `fluent-uri` based `Uri` type — construct via `"file://...".parse()`, not `Uri::from_file_path()`
+- lsp-types v0.97 `InitializeParams.root_uri` is deprecated — needs `#[allow(deprecated)]`, prefer `workspace_folders`
+- lsp-types v0.97 `ReferenceClientCapabilities = DynamicRegistrationClientCapabilities` (not `GotoCapability`)
+- ServerManager pattern: `ensure_server()` + `servers().lock()` avoids lifetime issues with async closures over `&LspClient`
 
 ---
 
@@ -1775,4 +1780,37 @@ Started: 03/09/2026 17:15:47
   - engram-ingest publicly exports all chunkers + detect_language, so estimation can reuse real chunking logic without duplication
   - globset is already a transitive dependency via engram-ingest; add it directly when needed in other crates
   - Source directory walking should skip `.` dirs, `node_modules`, `target` for performance
+---
+
+## 2026-03-11 - US-102
+- Implemented f16 embedding read/write support via the `half` crate (v2)
+- Added `PRECISION_F16 = 1` constant alongside existing `PRECISION_F32 = 0`
+- `write_embeddings_bin` now takes a `precision: u16` parameter; f32 values are converted to f16 before writing when precision is f16
+- `read_embeddings_bin` detects precision from the header and auto-converts f16 back to f32 for HNSW index consumption
+- Added `embedding_precision` field to `StorageConfig` in engram-core (defaults to "f32")
+- Updated all callers in snapshot.rs, knowledge.rs, pipeline.rs, boot.rs to pass precision parameter
+- 5 new f16-specific tests: round-trip single vector, round-trip accuracy (<0.1% relative error), storage is half size, header precision flag, unsupported precision error handling
+- Files changed: crates/engram-store/Cargo.toml, crates/engram-store/src/embeddings.rs, crates/engram-store/src/lib.rs, crates/engram-store/src/snapshot.rs, crates/engram-store/src/knowledge.rs, crates/engram-core/src/config.rs, crates/engram-ingest/src/pipeline.rs, crates/engram-query/src/boot.rs, Cargo.lock
+- All 964 workspace tests pass, clippy clean
+- **Learnings for future iterations:**
+  - half crate v2 provides `f16::from_f32()` and `f16::to_f32()` for conversion, `to_le_bytes()`/`from_le_bytes()` for serialization
+  - The embedding binary header already had a precision field reserved — adding f16 was a matter of using it
+  - f16 can represent small integers exactly but has ~0.1% relative error on typical embedding values (0.001-range floats)
+  - When changing a public function signature (adding params), all callers across the workspace must be updated — grep thoroughly
+---
+
+## 2026-03-11 - US-103
+- Implemented LSP client for symbol resolution in new crate `crates/engram-lsp/`
+- Created 4 modules: client.rs (JSON-RPC LSP client), lang.rs (language server configs), manager.rs (on-demand server lifecycle), resolver.rs (SymbolResolver trait impl)
+- Supports TypeScript (typescript-language-server), Rust (rust-analyzer), Python (pylsp), Go (gopls)
+- Implements textDocument/documentSymbol, textDocument/references, textDocument/prepareTypeHierarchy + supertypes/subtypes
+- ServerManager starts/shuts down language servers on-demand per language
+- 20 unit tests covering symbol kind conversion, flat/nested document symbol parsing, URI conversion, file line lookup, trait compliance
+- Files changed: Cargo.toml (workspace member), crates/engram-lsp/Cargo.toml, project.json, src/lib.rs, src/client.rs, src/lang.rs, src/manager.rs, src/resolver.rs
+- **Learnings for future iterations:**
+  - lsp-types v0.97 uses `fluent-uri` for Uri — no `from_file_path()`, must construct manually via `"file://...".parse()`
+  - `InitializeParams.root_uri` is deprecated in lsp-types v0.97 — needs `#[allow(deprecated)]`
+  - Holding a tokio `MutexGuard` across `.await` points with closures causes lifetime issues; use `ensure_server()` + explicit `lock()` pattern instead
+  - `ReferenceClientCapabilities` is an alias for `DynamicRegistrationClientCapabilities`, not `GotoCapability`
+  - `SymbolInformation.deprecated` field is deprecated — use `#[allow(deprecated)]` in tests that construct it
 ---
