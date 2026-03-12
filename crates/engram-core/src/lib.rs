@@ -16,8 +16,8 @@ pub use benchmark::{
 pub use chunk::{ChunkKind, ChunkMetadata, Partition};
 pub use config::{
     BenchmarkConfig, ChunkingConfig, ContextConfig, DashboardConfig, EmbeddingConfig, HooksConfig,
-    ModePreset, ModesConfig, OllamaConfig, SearchConfig, SourceConfig, StorageConfig, StoreConfig,
-    StoreSchema, StoreSection, SymbolResolutionConfig, WatcherConfig,
+    LspResolutionConfig, ModePreset, ModesConfig, OllamaConfig, SearchConfig, SourceConfig,
+    StorageConfig, StoreConfig, StoreSchema, StoreSection, SymbolResolutionConfig, WatcherConfig,
 };
 pub use embedding::{EmbedError, EmbeddingProvider};
 pub use error::{EngramError, Result};

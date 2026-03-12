@@ -24,6 +24,13 @@ impl LspSymbolResolver {
         }
     }
 
+    /// Create a new LSP symbol resolver with auto-install support.
+    pub fn with_auto_install(root_path: PathBuf, auto_install: bool) -> Self {
+        Self {
+            manager: ServerManager::with_auto_install(root_path, auto_install),
+        }
+    }
+
     /// Shut down all running language servers.
     pub async fn shutdown(&self) -> engram_core::Result<()> {
         self.manager.shutdown_all().await

@@ -112,6 +112,15 @@ impl Default for OllamaConfig {
 pub struct SymbolResolutionConfig {
     pub enabled: bool,
     pub backend: String,
+    #[serde(default)]
+    pub lsp: LspResolutionConfig,
+}
+
+/// LSP-specific resolution settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LspResolutionConfig {
+    #[serde(default)]
+    pub auto_install: bool,
 }
 
 impl Default for SymbolResolutionConfig {
@@ -119,6 +128,7 @@ impl Default for SymbolResolutionConfig {
         Self {
             enabled: true,
             backend: "tree-sitter".to_string(),
+            lsp: LspResolutionConfig::default(),
         }
     }
 }
