@@ -25,6 +25,8 @@ pub fn extract_key_abstractions(
         "python" => Some(Language::Python),
         "go" | "golang" => Some(Language::Go),
         "java" => Some(Language::Java),
+        "c" => Some(Language::C),
+        "c++" | "cpp" => Some(Language::Cpp),
         _ => None,
     };
 
@@ -196,6 +198,8 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
         Language::Python => tree_sitter_python::LANGUAGE.into(),
         Language::Go => tree_sitter_go::LANGUAGE.into(),
         Language::Java => tree_sitter_java::LANGUAGE.into(),
+        Language::C => tree_sitter_c::LANGUAGE.into(),
+        Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
     };
     parser
         .set_language(&ts_language)
@@ -224,6 +228,12 @@ fn extract_declarations(rel_path: &str, source: &str, language: Language) -> Vec
             }
             Language::Java => {
                 extract_java_declarations(&child, source, rel_path, &mut declarations);
+            }
+            Language::C => {
+                extract_c_declarations(&child, source, rel_path, &mut declarations);
+            }
+            Language::Cpp => {
+                extract_cpp_declarations(&child, source, rel_path, &mut declarations);
             }
         }
     }
@@ -486,6 +496,106 @@ fn extract_java_declarations(
     }
 }
 
+fn extract_c_declarations(
+    node: &Node,
+    source: &str,
+    file: &str,
+    decls: &mut Vec<RawDeclaration>,
+) {
+    match node.kind() {
+        "struct_specifier" | "enum_specifier" => {
+            if let Some(name) = field_text(node, "name", source) {
+                let kind = match node.kind() {
+                    "struct_specifier" => "struct",
+                    "enum_specifier" => "enum",
+                    _ => "type",
+                };
+                let description = extract_doc_comment(node, source);
+                decls.push(RawDeclaration {
+                    name,
+                    kind: kind.to_string(),
+                    file: file.to_string(),
+                    description,
+                    is_exported: true, // C has no visibility modifiers; all top-level are "exported"
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_cpp_declarations(
+    node: &Node,
+    source: &str,
+    file: &str,
+    decls: &mut Vec<RawDeclaration>,
+) {
+    match node.kind() {
+        "struct_specifier" | "enum_specifier" => {
+            if let Some(name) = field_text(node, "name", source) {
+                let kind = match node.kind() {
+                    "struct_specifier" => "struct",
+                    "enum_specifier" => "enum",
+                    _ => "type",
+                };
+                let description = extract_doc_comment(node, source);
+                decls.push(RawDeclaration {
+                    name,
+                    kind: kind.to_string(),
+                    file: file.to_string(),
+                    description,
+                    is_exported: true,
+                });
+            }
+        }
+        "class_specifier" => {
+            if let Some(name) = field_text(node, "name", source) {
+                let description = extract_doc_comment(node, source);
+                decls.push(RawDeclaration {
+                    name,
+                    kind: "class".to_string(),
+                    file: file.to_string(),
+                    description,
+                    is_exported: true,
+                });
+            }
+        }
+        "template_declaration" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                match child.kind() {
+                    "class_specifier" => {
+                        if let Some(name) = field_text(&child, "name", source) {
+                            let description = extract_doc_comment(node, source);
+                            decls.push(RawDeclaration {
+                                name,
+                                kind: "class".to_string(),
+                                file: file.to_string(),
+                                description,
+                                is_exported: true,
+                            });
+                        }
+                    }
+                    "struct_specifier" => {
+                        if let Some(name) = field_text(&child, "name", source) {
+                            let description = extract_doc_comment(node, source);
+                            decls.push(RawDeclaration {
+                                name,
+                                kind: "struct".to_string(),
+                                file: file.to_string(),
+                                description,
+                                is_exported: true,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn field_text(node: &Node, field: &str, source: &str) -> Option<String> {
     let child = node.child_by_field_name(field)?;
     Some(source[child.start_byte()..child.end_byte()].to_string())
@@ -700,6 +810,37 @@ pub(crate) fn detect_patterns(abstractions: &[Abstraction], language: &str) -> V
                         name: "Class-based architecture".to_string(),
                         description: "Uses classes for encapsulation and organization".to_string(),
                         examples: classes.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+        }
+        "c" => {
+            if let Some(structs) = kind_counts.get("struct") {
+                if structs.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Struct-based modeling".to_string(),
+                        description: "Uses structs for data modeling".to_string(),
+                        examples: structs.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+        }
+        "c++" | "cpp" => {
+            if let Some(classes) = kind_counts.get("class") {
+                if classes.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Class-based architecture".to_string(),
+                        description: "Uses classes for encapsulation and organization".to_string(),
+                        examples: classes.iter().take(3).map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+            if let Some(structs) = kind_counts.get("struct") {
+                if structs.len() >= 2 {
+                    patterns.push(PatternInfo {
+                        name: "Struct-based modeling".to_string(),
+                        description: "Uses structs for data modeling".to_string(),
+                        examples: structs.iter().take(3).map(|s| s.to_string()).collect(),
                     });
                 }
             }

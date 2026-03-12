@@ -21,6 +21,8 @@ pub enum Language {
     Python,
     Go,
     Java,
+    C,
+    Cpp,
 }
 
 /// Extracts semantic chunks from source code using tree-sitter AST parsing.
@@ -40,6 +42,8 @@ impl TreeSitterChunker {
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::Go => tree_sitter_go::LANGUAGE.into(),
             Language::Java => tree_sitter_java::LANGUAGE.into(),
+            Language::C => tree_sitter_c::LANGUAGE.into(),
+            Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -64,6 +68,8 @@ impl TreeSitterChunker {
                 Language::Python => self.extract_python_node(&child, source),
                 Language::Go => self.extract_go_node(&child, source),
                 Language::Java => self.extract_java_node(&child, source),
+                Language::C => self.extract_c_node(&child, source),
+                Language::Cpp => self.extract_cpp_node(&child, source),
             };
             if let Some(chunk) = extracted {
                 // Flush accumulated module content before this declaration
@@ -332,6 +338,90 @@ impl TreeSitterChunker {
             _ => None,
         }
     }
+
+    fn extract_c_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
+        match node.kind() {
+            "function_definition" => {
+                let name = c_function_name(node, source)?;
+                Some(make_chunk(ChunkKind::Function, name, node, source))
+            }
+            "struct_specifier" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "enum_specifier" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "type_definition" => {
+                // typedef ... name;
+                let name = field_text(node, "declarator", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_cpp_node(&self, node: &Node, source: &str) -> Option<RawChunk> {
+        match node.kind() {
+            "function_definition" => {
+                let name = c_function_name(node, source)?;
+                Some(make_chunk(ChunkKind::Function, name, node, source))
+            }
+            "struct_specifier" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "class_specifier" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Class, name, node, source))
+            }
+            "enum_specifier" => {
+                let name = field_text(node, "name", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            "namespace_definition" => {
+                let name = field_text(node, "name", source)
+                    .unwrap_or_else(|| "anonymous".to_string());
+                Some(make_chunk(ChunkKind::Module, name, node, source))
+            }
+            "template_declaration" => {
+                // Template wraps another declaration; extract the inner declaration's name
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "function_definition" => {
+                            let name = c_function_name(&child, source)?;
+                            return Some(make_chunk(ChunkKind::Function, name, node, source));
+                        }
+                        "class_specifier" => {
+                            let name = field_text(&child, "name", source)?;
+                            return Some(make_chunk(ChunkKind::Class, name, node, source));
+                        }
+                        "struct_specifier" => {
+                            let name = field_text(&child, "name", source)?;
+                            return Some(make_chunk(ChunkKind::Type, name, node, source));
+                        }
+                        "declaration" => {
+                            // Template function declaration
+                            let name = c_function_name(&child, source)
+                                .or_else(|| field_text(&child, "declarator", source));
+                            if let Some(n) = name {
+                                return Some(make_chunk(ChunkKind::Function, n, node, source));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            "type_definition" => {
+                let name = field_text(node, "declarator", source)?;
+                Some(make_chunk(ChunkKind::Type, name, node, source))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Default for TreeSitterChunker {
@@ -397,6 +487,29 @@ fn extract_signature(node: &Node, source: &str) -> Option<String> {
     }
     // Fallback: first line
     Some(text.lines().next().unwrap_or("").trim().to_string())
+}
+
+fn c_function_name(node: &Node, source: &str) -> Option<String> {
+    // C/C++ function_definition uses "declarator" field (a function_declarator node)
+    // which itself has a "declarator" field containing the identifier.
+    // For pointer return types (e.g. `void* foo()`), the declarator chain includes
+    // pointer_declarator → function_declarator → declarator (identifier).
+    let mut declarator = node.child_by_field_name("declarator")?;
+    // Unwrap pointer_declarator layers (e.g. `int *func()`)
+    while declarator.kind() == "pointer_declarator" || declarator.kind() == "reference_declarator" {
+        if let Some(inner) = declarator.child_by_field_name("declarator") {
+            declarator = inner;
+        } else {
+            break;
+        }
+    }
+    // function_declarator → declarator is the identifier
+    if let Some(inner) = declarator.child_by_field_name("declarator") {
+        let text = source[inner.start_byte()..inner.end_byte()].to_string();
+        Some(text)
+    } else {
+        Some(source[declarator.start_byte()..declarator.end_byte()].to_string())
+    }
 }
 
 fn rust_impl_name(node: &Node, source: &str) -> Option<String> {
@@ -1245,6 +1358,312 @@ public enum Status {
     fn chunks_do_not_overlap() {
         let source = "package com.example;\n\nimport java.util.*;\n\npublic class A { void m() {} }\n\npublic class B { void n() {} }";
         let chunks = chunk_java(source);
+        for i in 0..chunks.len() {
+            for j in (i + 1)..chunks.len() {
+                assert!(
+                    chunks[i].end_line <= chunks[j].start_line
+                        || chunks[j].end_line <= chunks[i].start_line,
+                    "Chunks {} and {} overlap: [{}-{}] vs [{}-{}]",
+                    chunks[i].name,
+                    chunks[j].name,
+                    chunks[i].start_line,
+                    chunks[i].end_line,
+                    chunks[j].start_line,
+                    chunks[j].end_line,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod c_tests {
+    use super::*;
+
+    fn chunk_c(source: &str) -> Vec<RawChunk> {
+        let chunker = TreeSitterChunker::new();
+        chunker.chunk_file(Path::new("test.c"), source, Language::C)
+    }
+
+    #[test]
+    fn extracts_function_definition() {
+        let source = "int add(int a, int b) {\n    return a + b;\n}";
+        let chunks = chunk_c(source);
+        assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function && c.name == "add"));
+        let func = chunks.iter().find(|c| c.name == "add").unwrap();
+        assert!(func.content.contains("return a + b"));
+    }
+
+    #[test]
+    fn extracts_struct_specifier() {
+        let source = "struct Point {\n    int x;\n    int y;\n};";
+        let chunks = chunk_c(source);
+        let s = chunks.iter().find(|c| c.name == "Point");
+        assert!(s.is_some());
+        assert_eq!(s.unwrap().kind, ChunkKind::Type);
+        assert!(s.unwrap().content.contains("int x"));
+    }
+
+    #[test]
+    fn extracts_enum_specifier() {
+        let source = "enum Color {\n    RED,\n    GREEN,\n    BLUE\n};";
+        let chunks = chunk_c(source);
+        let e = chunks.iter().find(|c| c.name == "Color");
+        assert!(e.is_some());
+        assert_eq!(e.unwrap().kind, ChunkKind::Type);
+    }
+
+    #[test]
+    fn extracts_typedef() {
+        let source = "typedef unsigned long size_t;";
+        let chunks = chunk_c(source);
+        let t = chunks.iter().find(|c| c.name == "size_t");
+        assert!(t.is_some());
+        assert_eq!(t.unwrap().kind, ChunkKind::Type);
+    }
+
+    #[test]
+    fn header_declarations_chunked() {
+        let source = r#"struct Config {
+    int port;
+    char* host;
+};
+
+enum Status {
+    OK,
+    ERROR
+};"#;
+        let chunks = chunk_c(source);
+        let has_struct = chunks.iter().any(|c| c.name == "Config" && c.kind == ChunkKind::Type);
+        let has_enum = chunks.iter().any(|c| c.name == "Status" && c.kind == ChunkKind::Type);
+        assert!(has_struct, "should have struct from header");
+        assert!(has_enum, "should have enum from header");
+    }
+
+    #[test]
+    fn signature_extraction() {
+        let source = "int multiply(int x, int y) {\n    return x * y;\n}";
+        let chunks = chunk_c(source);
+        let func = chunks.iter().find(|c| c.name == "multiply").unwrap();
+        let sig = func.signature.as_ref().unwrap();
+        assert!(sig.contains("int multiply(int x, int y)"));
+    }
+
+    #[test]
+    fn module_level_code_captured() {
+        let source = "#include <stdio.h>\n\nint main(void) {\n    printf(\"hello\");\n    return 0;\n}";
+        let chunks = chunk_c(source);
+        let func = chunks.iter().find(|c| c.name == "main");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().kind, ChunkKind::Function);
+    }
+
+    #[test]
+    fn mixed_declarations() {
+        let source = r#"struct Node {
+    int value;
+    struct Node* next;
+};
+
+enum Direction {
+    UP,
+    DOWN
+};
+
+typedef struct Node NodeT;
+
+void* allocate(int size) {
+    return 0;
+}
+"#;
+        let chunks = chunk_c(source);
+        let has_struct = chunks.iter().any(|c| c.name == "Node" && c.kind == ChunkKind::Type);
+        let has_enum = chunks.iter().any(|c| c.name == "Direction" && c.kind == ChunkKind::Type);
+        let has_typedef = chunks.iter().any(|c| c.name == "NodeT" && c.kind == ChunkKind::Type);
+        let has_func = chunks.iter().any(|c| c.name == "allocate" && c.kind == ChunkKind::Function);
+        assert!(has_struct, "should have struct");
+        assert!(has_enum, "should have enum");
+        assert!(has_typedef, "should have typedef");
+        assert!(has_func, "should have function");
+    }
+
+    #[test]
+    fn empty_c_source() {
+        let chunks = chunk_c("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunks_do_not_overlap_c() {
+        let source = "struct A { int x; };\n\nvoid foo() {}\n\nvoid bar() {}";
+        let chunks = chunk_c(source);
+        for i in 0..chunks.len() {
+            for j in (i + 1)..chunks.len() {
+                assert!(
+                    chunks[i].end_line <= chunks[j].start_line
+                        || chunks[j].end_line <= chunks[i].start_line,
+                    "Chunks {} and {} overlap: [{}-{}] vs [{}-{}]",
+                    chunks[i].name,
+                    chunks[j].name,
+                    chunks[i].start_line,
+                    chunks[i].end_line,
+                    chunks[j].start_line,
+                    chunks[j].end_line,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cpp_tests {
+    use super::*;
+
+    fn chunk_cpp(source: &str) -> Vec<RawChunk> {
+        let chunker = TreeSitterChunker::new();
+        chunker.chunk_file(Path::new("test.cpp"), source, Language::Cpp)
+    }
+
+    #[test]
+    fn extracts_function_definition() {
+        let source = "int add(int a, int b) {\n    return a + b;\n}";
+        let chunks = chunk_cpp(source);
+        assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function && c.name == "add"));
+    }
+
+    #[test]
+    fn extracts_class_specifier() {
+        let source = "class Calculator {\npublic:\n    int add(int a, int b) { return a + b; }\n};";
+        let chunks = chunk_cpp(source);
+        let cls = chunks.iter().find(|c| c.name == "Calculator");
+        assert!(cls.is_some());
+        assert_eq!(cls.unwrap().kind, ChunkKind::Class);
+        assert!(cls.unwrap().content.contains("add"));
+    }
+
+    #[test]
+    fn extracts_struct_specifier() {
+        let source = "struct Point {\n    double x;\n    double y;\n};";
+        let chunks = chunk_cpp(source);
+        let s = chunks.iter().find(|c| c.name == "Point");
+        assert!(s.is_some());
+        assert_eq!(s.unwrap().kind, ChunkKind::Type);
+    }
+
+    #[test]
+    fn extracts_enum_specifier() {
+        let source = "enum class Color {\n    Red,\n    Green,\n    Blue\n};";
+        let chunks = chunk_cpp(source);
+        let e = chunks.iter().find(|c| c.name == "Color");
+        assert!(e.is_some());
+        assert_eq!(e.unwrap().kind, ChunkKind::Type);
+    }
+
+    #[test]
+    fn extracts_namespace_definition() {
+        let source = "namespace mylib {\n    int helper() { return 42; }\n}";
+        let chunks = chunk_cpp(source);
+        let ns = chunks.iter().find(|c| c.name == "mylib");
+        assert!(ns.is_some());
+        assert_eq!(ns.unwrap().kind, ChunkKind::Module);
+    }
+
+    #[test]
+    fn extracts_template_class() {
+        let source = "template <typename T>\nclass Container {\npublic:\n    T value;\n};";
+        let chunks = chunk_cpp(source);
+        let cls = chunks.iter().find(|c| c.name == "Container");
+        assert!(cls.is_some());
+        assert_eq!(cls.unwrap().kind, ChunkKind::Class);
+        assert!(cls.unwrap().content.contains("template"));
+    }
+
+    #[test]
+    fn extracts_template_function() {
+        let source = "template <typename T>\nT maximum(T a, T b) {\n    return a > b ? a : b;\n}";
+        let chunks = chunk_cpp(source);
+        let func = chunks.iter().find(|c| c.name == "maximum");
+        assert!(func.is_some());
+        assert_eq!(func.unwrap().kind, ChunkKind::Function);
+    }
+
+    #[test]
+    fn header_declarations_chunked() {
+        let source = r#"class Engine {
+public:
+    void start();
+    void stop();
+private:
+    bool running;
+};
+
+struct Config {
+    int port;
+};
+
+enum class LogLevel {
+    Debug,
+    Info,
+    Error
+};"#;
+        let chunks = chunk_cpp(source);
+        let has_class = chunks.iter().any(|c| c.name == "Engine" && c.kind == ChunkKind::Class);
+        let has_struct = chunks.iter().any(|c| c.name == "Config" && c.kind == ChunkKind::Type);
+        let has_enum = chunks.iter().any(|c| c.name == "LogLevel" && c.kind == ChunkKind::Type);
+        assert!(has_class, "should have class from header");
+        assert!(has_struct, "should have struct from header");
+        assert!(has_enum, "should have enum from header");
+    }
+
+    #[test]
+    fn signature_extraction() {
+        let source = "int multiply(int x, int y) {\n    return x * y;\n}";
+        let chunks = chunk_cpp(source);
+        let func = chunks.iter().find(|c| c.name == "multiply").unwrap();
+        let sig = func.signature.as_ref().unwrap();
+        assert!(sig.contains("int multiply(int x, int y)"));
+    }
+
+    #[test]
+    fn mixed_declarations() {
+        let source = r#"namespace app {
+
+class Service {
+public:
+    void run();
+};
+
+struct Config {
+    int port;
+};
+
+enum class Mode {
+    Fast,
+    Safe
+};
+
+}
+
+void standalone() {
+}
+"#;
+        let chunks = chunk_cpp(source);
+        let has_namespace = chunks.iter().any(|c| c.name == "app" && c.kind == ChunkKind::Module);
+        let has_func = chunks.iter().any(|c| c.name == "standalone" && c.kind == ChunkKind::Function);
+        assert!(has_namespace, "should have namespace");
+        assert!(has_func, "should have standalone function");
+    }
+
+    #[test]
+    fn empty_cpp_source() {
+        let chunks = chunk_cpp("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunks_do_not_overlap_cpp() {
+        let source = "class A { int x; };\n\nvoid foo() {}\n\nvoid bar() {}";
+        let chunks = chunk_cpp(source);
         for i in 0..chunks.len() {
             for j in (i + 1)..chunks.len() {
                 assert!(

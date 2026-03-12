@@ -42,6 +42,8 @@ impl TreeSitterImportResolver {
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::Go => tree_sitter_go::LANGUAGE.into(),
             Language::Java => tree_sitter_java::LANGUAGE.into(),
+            Language::C => tree_sitter_c::LANGUAGE.into(),
+            Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         };
         parser
             .set_language(&ts_language)
@@ -57,8 +59,10 @@ impl TreeSitterImportResolver {
             Language::TypeScript => self.extract_ts_imports(&root, source, file),
             Language::Rust => self.extract_rust_imports(&root, source, file),
             Language::Python => self.extract_python_imports(&root, source, file),
-            Language::Go => vec![], // Go import extraction not yet implemented
-            Language::Java => vec![], // Java import extraction not yet implemented
+            Language::Go => vec![],
+            Language::Java => vec![],
+            Language::C => vec![],
+            Language::Cpp => vec![],
         }
     }
 

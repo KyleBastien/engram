@@ -2,6 +2,7 @@
 Started: 03/09/2026 17:15:47
 
 ## Codebase Patterns
+- tree-sitter-c/cpp v0.23 export `LANGUAGE`; C uses `type_definition` (not `declaration`) for typedefs with `declarator` field; C/C++ `function_definition` declarator chain needs pointer_declarator unwrapping for `void*` returns
 - tree-sitter-go v0.23 exports `LANGUAGE` (same as tree-sitter-rust/python); Go type_declaration nests type_spec, const_declaration nests const_spec, var_declaration nests var_spec
 - tree-sitter-java v0.23 exports `LANGUAGE` (same pattern); Java class_declaration includes annotations in its range; inner classes are part of outer class_declaration node
 - Adding a new Language variant requires match arms in: chunker.rs, imports.rs, exports.rs, abstractions.rs, detect.rs (5 files)
@@ -1941,4 +1942,27 @@ Started: 03/09/2026 17:15:47
   - Java inner classes are nested inside the outer class_declaration node — they come for free in the chunk content
   - Java top-level nodes: class_declaration, interface_declaration, enum_declaration, annotation_type_declaration; methods/constructors are inside class_body
   - detect.rs update for .java is handled by US-112 (separate story)
+---
+
+## 2026-03-11 - US-111
+- Implemented tree-sitter chunking for C and C++ languages
+- Added `C` and `Cpp` variants to `Language` enum
+- Added `tree-sitter-c` v0.23 and `tree-sitter-cpp` v0.23 dependencies
+- Implemented `extract_c_node()` and `extract_cpp_node()` methods in chunker.rs
+- C extracts: function_definition, struct_specifier, enum_specifier, type_definition (typedef)
+- C++ extracts: function_definition, struct_specifier, class_specifier, enum_specifier, namespace_definition, template_declaration, type_definition
+- Added `c_function_name()` helper that unwraps pointer_declarator/reference_declarator chains for pointer-return functions
+- Updated all 5 required files: chunker.rs, imports.rs, exports.rs, abstractions.rs, detect.rs
+- Added C/C++ language string matching and declaration extraction in abstractions.rs
+- Added C/C++ pattern detection (struct-based, class-based) in abstractions.rs
+- Added 10 C tests and 12 C++ tests covering functions, structs, enums, typedefs, classes, namespaces, templates, headers, signatures, mixed declarations, empty source, non-overlap
+- Note: detect.rs C/C++ extensions added (.c, .h → C; .cpp, .cc, .cxx, .hpp → Cpp) but Go/Java detection deferred to US-112
+- All 301 tests pass, clippy clean
+- Files changed: crates/engram-ingest/Cargo.toml, crates/engram-ingest/src/chunker.rs, crates/engram-ingest/src/detect.rs, crates/engram-ingest/src/imports.rs, crates/engram-ingest/src/exports.rs, crates/engram-ingest/src/abstractions.rs, tasks/prd.json, Cargo.lock
+- **Learnings for future iterations:**
+  - tree-sitter-c grammar uses `type_definition` node for typedefs (not `declaration` as one might expect); it has a `declarator` field for the name
+  - C/C++ `function_definition` uses `declarator` field chain: for pointer-return functions like `void* foo()`, the chain is pointer_declarator → function_declarator → declarator (identifier) — must unwrap pointer_declarator layers
+  - tree-sitter-c 0.23 and tree-sitter-cpp 0.23 are compatible with tree-sitter 0.24, consistent with other grammar crates
+  - Both tree-sitter-c and tree-sitter-cpp export `LANGUAGE` (same pattern as Go/Java/Rust/Python)
+  - `enum class` (C++ scoped enums) are parsed as `enum_specifier` with a `name` field — same extraction works for both C and C++
 ---

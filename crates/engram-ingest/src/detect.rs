@@ -23,6 +23,8 @@ pub fn detect_language(path: &Path) -> ChunkerKind {
         "ts" | "tsx" => ChunkerKind::TreeSitter(Language::TypeScript),
         "rs" => ChunkerKind::TreeSitter(Language::Rust),
         "py" => ChunkerKind::TreeSitter(Language::Python),
+        "c" | "h" => ChunkerKind::TreeSitter(Language::C),
+        "cpp" | "cc" | "cxx" | "hpp" => ChunkerKind::TreeSitter(Language::Cpp),
 
         // Markdown
         "md" | "mdx" => ChunkerKind::Markdown,
@@ -73,6 +75,54 @@ mod tests {
         assert_eq!(
             detect_language(Path::new("script.py")),
             ChunkerKind::TreeSitter(Language::Python)
+        );
+    }
+
+    #[test]
+    fn c_c() {
+        assert_eq!(
+            detect_language(Path::new("main.c")),
+            ChunkerKind::TreeSitter(Language::C)
+        );
+    }
+
+    #[test]
+    fn c_h() {
+        assert_eq!(
+            detect_language(Path::new("header.h")),
+            ChunkerKind::TreeSitter(Language::C)
+        );
+    }
+
+    #[test]
+    fn cpp_cpp() {
+        assert_eq!(
+            detect_language(Path::new("main.cpp")),
+            ChunkerKind::TreeSitter(Language::Cpp)
+        );
+    }
+
+    #[test]
+    fn cpp_cc() {
+        assert_eq!(
+            detect_language(Path::new("main.cc")),
+            ChunkerKind::TreeSitter(Language::Cpp)
+        );
+    }
+
+    #[test]
+    fn cpp_cxx() {
+        assert_eq!(
+            detect_language(Path::new("main.cxx")),
+            ChunkerKind::TreeSitter(Language::Cpp)
+        );
+    }
+
+    #[test]
+    fn cpp_hpp() {
+        assert_eq!(
+            detect_language(Path::new("header.hpp")),
+            ChunkerKind::TreeSitter(Language::Cpp)
         );
     }
 
